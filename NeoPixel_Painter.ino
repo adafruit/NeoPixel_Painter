@@ -13,8 +13,11 @@
 
 // CONFIGURABLE STUFF ----------------------------------------------
 
-#define N_LEDS      144 // MUST be multiple of 4, max value of 168
-#define CARD_SELECT  10 // SD card select pin
+#define N_LEDS       144 // MUST be multiple of 4, max value of 168
+#define CARD_SELECT   10 // SD card select pin
+#define BLOCKTIME   2200 // SD card block read time, microseconds
+#define OVERHEAD     300 // Extra timing margin, microseconds
+// Use SDbenchmark utility to determine BLOCKTIME
 
 const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 // Display is split into four equal segments, each connected to a
@@ -31,6 +34,13 @@ const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 
 
 // NON-CONFIGURABLE STUFF ------------------------------------------
+
+// Maximum playback lines/second
+#define MAX_LPS (1000000L / (BLOCKTIME + ((N_LEDS * 30L) / 4) + OVERHEAD))
+#if MAX_LPS > 400L
+ #undef  MAX_LPS
+ #define MAX_LPS 400L // NeoPixel PWM rate is ~400 Hz
+#endif
 
 const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -50,19 +60,18 @@ const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
   177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
   215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255 };
 
-volatile uint8_t  ledBuf[N_LEDS * 3], // Data for NeoPixels
-                 *ledPort;            // PORT register for all LEDs
-uint8_t           ledPortMask,        // PORT bitmask for all LEDs
-                  ledMaskA[4],        // Bitmask for each pin, LED bits 7, 5, 3, 1
-                  ledMaskB[4];        // Bitmask for each pin, LED bits 6, 4, 2, 0
-Sd2Card           card;               // SD card global instance (only one)
-SdVolume          volume;             // Filesystem global instance (only one)
-SdFile            root;               // Root directory (only one)
-
-uint32_t          firstBlock, nBlocks;
-volatile uint32_t block;
-volatile uint8_t  tSave; // Timer0 interrupt mask storage
-volatile boolean  stopFlag;
+volatile uint8_t  ledBuf[N_LEDS * 3],  // Data for NeoPixels
+                 *ledPort;             // PORT register for all LEDs
+uint8_t           ledPortMask,         // PORT bitmask for all LEDs
+                  ledMaskA[4],         // Bitmask for each pin, LED bits 7, 5, 3, 1
+                  ledMaskB[4];         // Bitmask for each pin, LED bits 6, 4, 2, 0
+Sd2Card           card;                // SD card global instance (only one)
+SdVolume          volume;              // Filesystem global instance (only one)
+SdFile            root;                // Root directory (only one)
+uint32_t          firstBlock, nBlocks; // Working file block specs
+volatile uint32_t block;               // Current block #
+volatile uint8_t  tSave;               // Timer0 interrupt mask storage
+volatile boolean  stopFlag;            // If set, stop Timer1 interrupt
 
 
 // INITIALIZATION --------------------------------------------------
@@ -102,7 +111,7 @@ void setup() {
   // convert 'test.bmp' at startup, then play back each time
   // the trigger button is pressed (or loop repeatedly if
   // button is held down).
-  bmpConvert(root, "test.bmp", "tmp.tmp");
+  bmpConvert(root, "test.bmp", "tmp.tmp", analogRead(A0) / 4);
 
   // Prepare for reading from file
   uint32_t fileSize = 0L;
@@ -128,7 +137,7 @@ static void error(const __FlashStringHelper *ptr) {
 void loop() {
   while(digitalRead(TRIGGER) == HIGH); // Wait for trigger button
 
-  uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, 300);
+  uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, MAX_LPS);
   Serial.println(linesPerSec);
 
   // Disable Timer0 interrupt for smoother playback
@@ -183,14 +192,14 @@ ISR(TIMER1_OVF_vect) {
 // counterclockwise on computer prior to transferring to SD card.
 // As currently written, both the input and output files need to be
 // in the same directory.
-boolean bmpConvert(SdFile &path, char *inFile, char *outFile) {
+boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness) {
 
   SdFile   bmpFile;              // Windows BMP file for input
   boolean  goodBmp   = false;    // True on valid BMP header parse
   int      bmpWidth, bmpHeight;  // W, H in pixels
   uint32_t bmpImageoffset,       // Start of image data in BMP file
            startTime = millis();
-  
+
   Serial.print(F("Loading image '"));
   Serial.print(inFile);
   Serial.print(F("'..."));
@@ -246,6 +255,8 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile) {
           columns        = bmpWidth;
         }
 
+        brightness++; // Rollover OK, fun with math!
+
         Serial.print(F("Converting..."));
         for(int row=0; row<bmpHeight; row++) { // For each image row...
           Serial.write('.');
@@ -284,9 +295,15 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile) {
                                     ledColumn)]; // Second half of display - strips are forward
 
               // Reorder BMP BGR to NeoPixel GRB
-              pixel[NEO_BLUE]  = pgm_read_byte(&gamma[*bmpPtr++]);
-              pixel[NEO_GREEN] = pgm_read_byte(&gamma[*bmpPtr++]);
-              pixel[NEO_RED]   = pgm_read_byte(&gamma[*bmpPtr++]);
+              if(brightness) {
+                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
+                pixel[NEO_GREEN] = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
+                pixel[NEO_RED]   = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
+              } else {
+                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[*bmpPtr++]);
+                pixel[NEO_GREEN] = pgm_read_byte(&gamma[*bmpPtr++]);
+                pixel[NEO_RED]   = pgm_read_byte(&gamma[*bmpPtr++]);
+              }
 
               // Process 3 color bytes, turning sideways, MSB first
               for(uint8_t color=0; color<3; color++) {
