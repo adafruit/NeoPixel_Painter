@@ -102,7 +102,8 @@ void setup() {
   Serial.println(F("OK"));
 
   if(!volume.init(card)) {
-    error(F("Could not find FAT16/FAT32 partition.\nMake sure the card is formatted."));
+    error(F("Could not find FAT16/FAT32 partition.\n"
+            "Make sure the card is formatted."));
   }
   Serial.println(F("Volume type is FAT"));
   root.openRoot(volume);
@@ -192,6 +193,9 @@ ISR(TIMER1_OVF_vect) {
 // counterclockwise on computer prior to transferring to SD card.
 // As currently written, both the input and output files need to be
 // in the same directory.
+// Brightness is set during conversion; there aren't enough cycles
+// to do this in realtime during playback.  To change brightness,
+// re-convert image with new brightness setting.
 boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness) {
 
   SdFile   bmpFile;              // Windows BMP file for input
