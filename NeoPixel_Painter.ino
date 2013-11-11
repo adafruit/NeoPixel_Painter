@@ -147,16 +147,16 @@ void loop() {
   uint32_t block    = 0;     // Current block # within file
   boolean  stopFlag = false; // If set, stop playback loop
 
-  while(digitalRead(TRIGGER) == HIGH); // Wait for trigger button
+  // Stage first block (but don't display yet --
+  // the loop below does that only when Timer1 overflows).
+  card.readData(firstBlock, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
+
+  while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
   uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, maxLPS);
   Serial.println(linesPerSec);
 
-  OCR1A = (F_CPU / 64) / linesPerSec; // Timer1 interval
-
-  // Stage first block (but don't display yet --
-  // the loop below does that only when Timer1 overflows).
-  card.readData(firstBlock, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
+  OCR1A = (F_CPU / 64) / linesPerSec;    // Timer1 interval
 
   for(;;) {
     while(!(TIFR1 & _BV(TOV1)));         // Wait for Timer1 overflow
