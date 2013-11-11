@@ -1,13 +1,31 @@
 // Adafruit NeoPixel Light Painter sketch:
 // Reads 24-bit BMP image from SD card, plays back on 4 NeoPixel
-// strips arranged in a continuous line.  Performance and
-// implementation is closely tailored to the Arduino Uno; this will
-// not work with 'soft' SPI on the Arduino Mega, the pin selection
-// may require work on the Leonardo, and the use of AVR-specific
-// registers means this won't work on the Due.  On a good day it
-// could probably be adapted to Teensy or other AVR Arduino-type
-// boards that support SD cards and can meet the pin requirements.
-// So really, just use an Uno, much easier on everyone.
+// strips arranged in a continuous line.
+
+// Requires a momentary pushbutton connected between pin A1 and GND
+// to trigger playback.  An analog pot (e.g. 10K) connected to A0
+// sets the brightness at startup and the playback speed each time
+// the trigger is tapped.  BRIGHTNESS IS SET ONLY AT STARTUP; can't
+// adjust this in realtime, not fast enough.  To change brightness,
+// set dial & tap reset.  Adjustment takes place during conversion.
+// Then set dial for playback speed.
+
+// This is a 'plain vanilla' example, with no UI or anything -- it
+// always reads a fixed file at startup (paint.bmp, in root folder),
+// outputs paint.tmp (warning: doesn't ask, just overwrites it),
+// then plays back from this file each time a button is tapped (or
+// loops repeatedly if held).  Core pieces are here for developing
+// more advanced cases: applications could add a UI (e.g. 16x2 LCD
+// shield), process multiple files for animation, or use a rotary
+// encoder for absolute positioning.  None of that is here though,
+// you will need to get clever and rip up some of this code.
+
+// Implementation is closely tailored to the Arduino Uno or similar
+// boards; this WILL NOT WORK with 'soft' SPI on the Arduino Mega,
+// and the use of AVR-specific registers means this won't work on
+// the Due.  On a good day it could perhaps be adapted to Teensy 2.0
+// or other AVR Arduino-type boards that support SD cards and can
+// meet the pin requirements.  Easiest by far just to use an Uno.
 
 #include <SD.h>
 #include <avr/pgmspace.h>
@@ -16,6 +34,9 @@
 
 #define N_LEDS      144 // MUST be multiple of 4, max value of 168
 #define CARD_SELECT  10 // SD card select pin
+#define SPEED        A0 // Speed-setting dial
+#define BRIGHTNESS   A0 // Brightness-setting dial
+#define TRIGGER      A1 // Playback trigger pin
 
 const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 // Display is split into four equal segments, each connected to a
@@ -24,11 +45,13 @@ const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 // but the requirements there are quite complex to explain -- it's
 // easiest just to use 4 contiguous bits on the port (e.g. on
 // Arduino Uno, pins 4-7 correspond to PORTD bits 4-7).  Segments
-// are placed left-to-right, with the first two segments flipped
+// are placed left-to-right, with the first two segments reversed
 // (first pixel at right) in order to minimize wire lengths (Arduino
 // is positioned in middle of four segments).
-
-#define TRIGGER A1 // Playback trigger pin (pull low to activate)
+// <---Strip 1---< <---Strip 2---< >---Strip 3---> >---Strip 4--->
+//         Pin 4 ^         Pin 5 ^ ^ Pin 6         ^ Pin 7
+// If the image is backwards, you don't need to re-wire anything,
+// just flip the bar over.
 
 
 // NON-CONFIGURABLE STUFF ------------------------------------------
@@ -89,7 +112,7 @@ void setup() {
     error(F("failed. Things to check:\n"
             "* is a card is inserted?\n"
             "* Is your wiring correct?\n"
-            "* did you edit CARD_SELECT to match your shield or module?"));
+            "* did you edit CARD_SELECT to match the SD shield or module?"));
   }
   Serial.println(F("OK"));
 
@@ -100,17 +123,16 @@ void setup() {
   Serial.println(F("Volume type is FAT"));
   root.openRoot(volume);
 
-  // This is sort of rigged for the test application...always
-  // convert 'test.bmp' at startup, then play back each time
-  // the trigger button is pressed (or loop repeatedly if
-  // button is held down).
-  bmpConvert(root, "test.bmp", "tmp.tmp", analogRead(A0) / 4);
+  // This is rigged for the test application: always convert 'paint.bmp'
+  // at startup, then play back each time the trigger button is pressed
+  // (or loop repeatedly if button is held down).
+  bmpConvert(root, "paint.bmp", "paint.tmp", analogRead(BRIGHTNESS) / 4);
 
   // Prepare for reading from file; determine first block, block count,
   // make a read pass through the file to estimate block read time (+10%
   // margin) and max playback lines/sec.
   uint32_t fileSize = 0L;
-  if(!(firstBlock = contigFile(root, "tmp.tmp", &fileSize))) {
+  if(!(firstBlock = contigFile(root, "paint.tmp", &fileSize))) {
     error(F("Could not open tempfile for input"));
   }
   nBlocks = fileSize / 512;
@@ -153,7 +175,7 @@ void loop() {
 
   while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
-  uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, maxLPS);
+  uint32_t linesPerSec = map(analogRead(SPEED), 0, 1023, 10, maxLPS);
   Serial.println(linesPerSec);
 
   OCR1A = (F_CPU / 64) / linesPerSec;    // Timer1 interval
