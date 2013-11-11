@@ -7,17 +7,15 @@
 // registers means this won't work on the Due.  On a good day it
 // could probably be adapted to Teensy or other AVR Arduino-type
 // boards that support SD cards and can meet the pin requirements.
+// So really, just use an Uno, much easier on everyone.
 
 #include <SD.h>
 #include <avr/pgmspace.h>
 
 // CONFIGURABLE STUFF ----------------------------------------------
 
-#define N_LEDS       144 // MUST be multiple of 4, max value of 168
-#define CARD_SELECT   10 // SD card select pin
-#define BLOCKTIME   2200 // SD card block read time, microseconds
-#define OVERHEAD     300 // Extra timing margin, microseconds
-// Use SDbenchmark utility to determine BLOCKTIME
+#define N_LEDS      144 // MUST be multiple of 4, max value of 168
+#define CARD_SELECT  10 // SD card select pin
 
 const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 // Display is split into four equal segments, each connected to a
@@ -35,12 +33,7 @@ const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
 
 // NON-CONFIGURABLE STUFF ------------------------------------------
 
-// Maximum playback lines/second
-#define MAX_LPS (1000000L / (BLOCKTIME + ((N_LEDS * 30L) / 4) + OVERHEAD))
-#if MAX_LPS > 400L
- #undef  MAX_LPS
- #define MAX_LPS 400L // NeoPixel PWM rate is ~400 Hz
-#endif
+#define OVERHEAD 150 // Extra microseconds for loop processing, etc.
 
 const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -60,18 +53,17 @@ const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
   177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
   215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255 };
 
-volatile uint8_t  ledBuf[N_LEDS * 3],  // Data for NeoPixels
-                 *ledPort;             // PORT register for all LEDs
-uint8_t           ledPortMask,         // PORT bitmask for all LEDs
-                  ledMaskA[4],         // Bitmask for each pin, LED bits 7, 5, 3, 1
-                  ledMaskB[4];         // Bitmask for each pin, LED bits 6, 4, 2, 0
-Sd2Card           card;                // SD card global instance (only one)
-SdVolume          volume;              // Filesystem global instance (only one)
-SdFile            root;                // Root directory (only one)
-uint32_t          firstBlock, nBlocks; // Working file block specs
-volatile uint32_t block;               // Current block #
-volatile uint8_t  tSave;               // Timer0 interrupt mask storage
-volatile boolean  stopFlag;            // If set, stop Timer1 interrupt
+volatile uint8_t  ledBuf[N_LEDS * 3], // Data for NeoPixels
+                 *ledPort;            // PORT register for all LEDs
+uint8_t           ledPortMask,        // PORT bitmask for all LEDs
+                  ledMaskA[4],        // Bitmask for each pin, LED bits 7, 5, 3, 1
+                  ledMaskB[4];        // Bitmask for each pin, LED bits 6, 4, 2, 0
+Sd2Card           card;               // SD card global instance (only one)
+SdVolume          volume;             // Filesystem global instance (only one)
+SdFile            root;               // Root directory (only one)
+uint16_t          maxLPS;             // Max playback lines/sec
+uint32_t          firstBlock,         // First block # in working (temp) file
+                  nBlocks;            // Number of blocks in file
 
 
 // INITIALIZATION --------------------------------------------------
@@ -114,18 +106,34 @@ void setup() {
   // button is held down).
   bmpConvert(root, "test.bmp", "tmp.tmp", analogRead(A0) / 4);
 
-  // Prepare for reading from file
+  // Prepare for reading from file; determine first block, block count,
+  // make a read pass through the file to estimate block read time (+10%
+  // margin) and max playback lines/sec.
   uint32_t fileSize = 0L;
-  firstBlock = contigFile(root, "tmp.tmp", &fileSize);
-  if(!firstBlock) return;
+  if(!(firstBlock = contigFile(root, "tmp.tmp", &fileSize))) {
+    error(F("Could not open tempfile for input"));
+  }
   nBlocks = fileSize / 512;
+  maxLPS  = (uint16_t)(1000000L /
+    (((benchmark(firstBlock, nBlocks) * 11) / 10) +
+     ((N_LEDS * 30L) / 4) + OVERHEAD));
+  if(maxLPS > 400) maxLPS = 400; // NeoPixel PWM rate is ~400 Hz
 
-  digitalWrite(TRIGGER, HIGH); // Enable pullup on trigger button
+  digitalWrite(TRIGGER, HIGH);   // Enable pullup on trigger button
 
   // Set up Timer1 for 64:1 prescale (250 KHz clock source),
-  // fast PWM mode, no PWM out...but don't enable interrupt yet.
+  // fast PWM mode, no PWM out.
   TCCR1A = _BV(WGM11) | _BV(WGM10);
   TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS11) | _BV(CS10);
+  // IMPORTANT: Timer1 interrupt is not used; instead, overflow bit is
+  // tightly polled.  Provides same accuracy for line interval timing.
+  // Very infrequently a block read may inexplicably take longer than
+  // normal...using an interrupt, the code would clobber itself.
+  // By polling instead, worst case is a slight glitch where the
+  // corresponding line will be a little thicker than normal.
+
+  // Disable Timer0 interrupt for smoother playback
+  TIMSK0 = 0;
 }
 
 // Fatal error handler; doesn't return, doesn't run loop()
@@ -136,43 +144,38 @@ static void error(const __FlashStringHelper *ptr) {
 
 
 void loop() {
+  uint32_t block    = 0;     // Current block # within file
+  boolean  stopFlag = false; // If set, stop playback loop
+
   while(digitalRead(TRIGGER) == HIGH); // Wait for trigger button
 
-  uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, MAX_LPS);
+  uint32_t linesPerSec = map(analogRead(A0), 0, 1023, 10, maxLPS);
   Serial.println(linesPerSec);
 
-  // Disable Timer0 interrupt for smoother playback
-  tSave    = TIMSK0;
-  TIMSK0   = 0;
+  OCR1A = (F_CPU / 64) / linesPerSec; // Timer1 interval
 
-  // Stage first block (don't play yet -- interrupt does that)
+  // Stage first block (but don't display yet --
+  // the loop below does that only when Timer1 overflows).
   card.readData(firstBlock, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
-  block    = 0;
-  stopFlag = false;
 
-  OCR1A    = (F_CPU / 64) / linesPerSec; // Timer1 interval
-  TCNT1    = 0;                          // Reset counter
-  TIMSK1   = _BV(TOIE1);                 // Enable overflow interrupt
+  for(;;) {
+    while(!(TIFR1 & _BV(TOV1)));         // Wait for Timer1 overflow
+    TIFR1 |= _BV(TOV1);                  // Clear overflow bit
 
-  while(digitalRead(TRIGGER) == LOW); // Wait for release
-}
+    show((uint8_t *)ledBuf);             // Display current line
+    if(stopFlag) break;                  // Break when done
 
-
-ISR(TIMER1_OVF_vect) {
-
-  show((uint8_t *)ledBuf);
-
-  if(stopFlag) {
-    TIMSK1 = 0;     // Stop Timer1 overflow interrupt
-    TIMSK0 = tSave; // Restore Timer0 interrupt
-  } else {
-    if(++block >= nBlocks) { // End of data?
-      if(digitalRead(TRIGGER) == HIGH) {
-        memset((void *)ledBuf, 0, sizeof(ledBuf)); // Turn off LEDs on next pass
+    if(++block >= nBlocks) {             // Past last block?
+      if(digitalRead(TRIGGER) == HIGH) { // Trigger released?
+        // Clear ledBuf to turn off LEDs on next overflow,
+        // set flag to stop playback after that.
+        // memset() was causing inexplicable crash,
+        // so clearing ledBuf manually here:
+        for(int i=0; i<sizeof(ledBuf); i++) ledBuf[i] = 0;
         stopFlag = true;
-        return;
-      }
-      block = 0; // Loop back to start
+        continue;
+      }                                  // Else trigger still held
+      block = 0;                         // Loop back to start
     }
     card.readData(firstBlock + block, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
   }
@@ -356,7 +359,7 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
         Serial.println("'");
       }
 
-      Serial.print(F("Loaded in "));
+      Serial.print(F("Converted in "));
       Serial.print(millis() - startTime);
       Serial.println(" ms");
     } // end goodBmp
@@ -429,6 +432,18 @@ static uint32_t contigFile(SdFile &path, char *filename, uint32_t *bytes) {
   return b; // First block of file
 }
 
+// Estimate maximum block-read time for card (microseconds)
+static uint32_t benchmark(uint32_t block, uint32_t n) {
+  uint32_t t, maxTime = 0L;
+
+  do {
+    t = micros();
+    card.readData(block++, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
+    if((t = (micros() - t)) > maxTime) maxTime = t;
+  } while(--n);
+
+  return maxTime;
+}
 
 // NEOPIXEL HANDLER ------------------------------------------------
 
