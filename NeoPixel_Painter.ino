@@ -226,6 +226,7 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
   SdFile   bmpFile;              // Windows BMP file for input
   boolean  goodBmp   = false;    // True on valid BMP header parse
   int      bmpWidth, bmpHeight;  // W, H in pixels
+  uint16_t b16;                  // 16-bit dup of brightness+1
   uint32_t bmpImageoffset,       // Start of image data in BMP file
            startTime = millis();
 
@@ -285,6 +286,7 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
         }
 
         brightness++; // Rollover OK, fun with math!
+        b16 = (int)brightness;
 
         Serial.print(F("Converting..."));
         for(int row=0; row<bmpHeight; row++) { // For each image row...
@@ -325,9 +327,9 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
 
               // Reorder BMP BGR to NeoPixel GRB
               if(brightness) {
-                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
-                pixel[NEO_GREEN] = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
-                pixel[NEO_RED]   = pgm_read_byte(&gamma[(*bmpPtr++ * brightness) >> 8]);
+                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
+                pixel[NEO_GREEN] = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
+                pixel[NEO_RED]   = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
               } else {
                 pixel[NEO_BLUE]  = pgm_read_byte(&gamma[*bmpPtr++]);
                 pixel[NEO_GREEN] = pgm_read_byte(&gamma[*bmpPtr++]);
