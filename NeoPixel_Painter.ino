@@ -527,37 +527,38 @@ static void show(uint8_t *ptr) {
   // ST instructions:         ^    ^       ^       (T=0,5,13+20,25,33)
 
   asm volatile (                               // Clk  Pseudocode
-    "ld   %[b]       , %a[ptr]+"        "\n\t" //     b    = *ptr++                      Queue up first byte,
-    "mov  %A[lptr]   , %[b]"            "\n\t" //     LSB  = b                           start masking
-    "andi %A[lptr]   , 0x0F"            "\n\t" //     LSB &= 0x0F                        low nybble for
-    "clr  %B[lptr]"                     "\n\t" //     MSB  = 0                           ledMask lookup.
-   "NeoX4_%=:"                          "\n\t" //                          (T =  0, 40)  For each byte...
-    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T =  2)      All NeoPixel pins high.
-    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T =  3)      Get pointer to next pin
-    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T =  4)      state from ledMask array.
-    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T =  5)      Load next pin state.
-    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T =  7)      Send to PORT.
-    "swap %[b]"                         "\n\t" // 1   b    = (b<<4)|(b>>4) (T =  8)      Swap high/low nybbles.
-    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T =  9)      Mask low nybble for
-    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 10)      next lookup.
+    "ld   %[b]       , %a[ptr]+"        "\n\t" //     b    = *ptr++                  Queue up first byte,
+    "mov  %A[lptr]   , %[b]"            "\n\t" //     LSB  = b                       start masking
+    "andi %A[lptr]   , 0x0F"            "\n\t" //     LSB &= 0x0F                    low nybble for
+    "clr  %B[lptr]"                     "\n\t" //     MSB  = 0                       ledMask lookup.
+   "NeoX4_%=:"                          "\n\t" //                          (T =  0)  For each byte...
+    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T =  2)  All NeoPixel pins high.
+    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T =  3)  Get pointer to next pin
+    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T =  4)  state from ledMask array.
+    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T =  5)  Load next pin state.
+    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T =  7)  Send to PORT.
+    "swap %[b]"                         "\n\t" // 1   b    = (b<<4)|(b>>4) (T =  8)  Swap high/low nybbles.
+    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T =  9)  Mask low nybble for
+    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 10)  next lookup.
     "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 11)
-    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T = 12)      Get pointer for later
-    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T = 13)      pin state.
-    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 15)      All NeoPixel pins low.
-    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T = 16)      Load next pin state.
-    "ld   %[b]       , %a[ptr]+"        "\n\t" // 2   b    = *ptr++        (T = 18)      Queue next byte.
+    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T = 12)  Get pointer for later
+    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T = 13)  pin state.
+    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 15)  All NeoPixel pins low.
+    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T = 16)  Load next pin state.
+    "ld   %[b]       , %a[ptr]+"        "\n\t" // 2   b    = *ptr++        (T = 18)  Queue next byte.
     "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T = 19)
-    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 20)      Mask low nybble.
-    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T = 22)      All NeoPixel pins high.
+    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 20)  Mask low nybble.
+    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T = 22)  All NeoPixel pins high.
     "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 23)
     "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 25)
-    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T = 27)      Issue next pin state.
+    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T = 27)  Issue next pin state.
     "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 29)
     "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 31)
     "sbiw %[i]       , 1"               "\n\t" // 2   i--                  (T = 33)
-    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 35)      All NeoPixel pins low.
+    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 35)  All NeoPixel pins low.
     "nop"                               "\n\t" // 1   nop                  (T = 36)
-    "brne NeoX4_%="                     "\n"   // 2   if(i) goto NeoX4     (T = 38)
+    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 38)
+    "brne NeoX4_%="                     "\n"   // 2   if(i) goto NeoX4     (T = 40)
     : [port]  "+e" (ledPort),
       [b]     "+r" (b),
       [i]     "+w" (i)
