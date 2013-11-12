@@ -37,21 +37,21 @@
 #define SPEED        A0 // Speed-setting dial
 #define BRIGHTNESS   A0 // Brightness-setting dial
 #define TRIGGER      A1 // Playback trigger pin
-
-const uint8_t PROGMEM ledPin[4] = { 4, 5, 6, 7 };
+// Define ENCODERSTEPS to use rotary encoder rather than timer
+// to advance each line.  The encoder MUST be on digital pin 5.
+//#define ENCODERSTEPS 10 // # of steps needed to advance 1 line
+const uint8_t PROGMEM ledPin[4] = { 3, 4, 6, 7 };
 // Display is split into four equal segments, each connected to a
 // different pin (listed in above array).  The 4 pins MUST be on the
-// same PORT register.  They don't necessarily need to be adjacent,
-// but the requirements there are quite complex to explain -- it's
-// easiest just to use 4 contiguous bits on the port (e.g. on
-// Arduino Uno, pins 4-7 correspond to PORTD bits 4-7).  Segments
-// are placed left-to-right, with the first two segments reversed
-// (first pixel at right) in order to minimize wire lengths (Arduino
-// is positioned in middle of four segments).
+// same PORT register, but don't necessarily need to be adjacent.
+// Segments are placed left-to-right, with the first two segments
+// reversed (first pixel at right) in order to minimize wire lengths
+// (Arduino is positioned in middle of four segments).
 // <---Strip 1---< <---Strip 2---< >---Strip 3---> >---Strip 4--->
-//         Pin 4 ^         Pin 5 ^ ^ Pin 6         ^ Pin 7
+//         Pin 3 ^         Pin 4 ^ ^ Pin 6         ^ Pin 7
 // If the image is backwards, you don't need to re-wire anything,
 // just flip the bar over.
+// Pin 5 is skipped here to allow use with encoder.
 
 
 // NON-CONFIGURABLE STUFF ------------------------------------------
@@ -79,8 +79,7 @@ const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
 volatile uint8_t  ledBuf[N_LEDS * 3], // Data for NeoPixels
                  *ledPort;            // PORT register for all LEDs
 uint8_t           ledPortMask,        // PORT bitmask for all LEDs
-                  ledMaskA[4],        // Bitmask for each pin, LED bits 7, 5, 3, 1
-                  ledMaskB[4];        // Bitmask for each pin, LED bits 6, 4, 2, 0
+                  ledMask[16];        // Bitmask for each pin combination
 Sd2Card           card;               // SD card global instance (only one)
 SdVolume          volume;             // Filesystem global instance (only one)
 SdFile            root;               // Root directory (only one)
@@ -92,7 +91,7 @@ uint32_t          firstBlock,         // First block # in working (temp) file
 // INITIALIZATION --------------------------------------------------
 
 void setup() {
-  uint8_t i, p;
+  uint8_t i, p, b;
 
   Serial.begin(57600);
 
@@ -100,11 +99,23 @@ void setup() {
     p = pgm_read_byte(&ledPin[i]);         // Arduino pin number
     pinMode(p, OUTPUT);                    // Set as output
     digitalWrite(p, LOW);                  // Output low
-    ledMaskA[i]  = digitalPinToBitMask(p); // Bitmask for this pin
-    ledMaskB[i]  = (ledMaskA[i] << 4) | (ledMaskA[i] >> 4);
-    ledPortMask |= ledMaskA[i];            // Cumulative mask, all pins
+    ledPortMask |= digitalPinToBitMask(p); // Cumulative mask, all pins
   }
   ledPort = portOutputRegister(digitalPinToPort(p));
+  for(i=0; i<16; i++) {                   // For each 4-bit pattern...
+    ledMask[i] = 0;                       // Clear port bitmask
+    for(b=0; b<4; b++) {                  // For each bit in pattern...
+      if(i & (1 << b)) {                  // If bit set,
+        ledMask[i] |=                     //  add pin to bitmask
+          digitalPinToBitMask(pgm_read_byte(&ledPin[b]));
+      }
+    }
+  }
+
+#ifdef ENCODERSTEPS
+  pinMode(5, INPUT);
+  digitalWrite(5, HIGH);  // Enable pullup on encoder pin
+#endif
 
   Serial.print(F("Initializing SD card..."));
   pinMode(CARD_SELECT, OUTPUT);
@@ -143,6 +154,14 @@ void setup() {
 
   digitalWrite(TRIGGER, HIGH);   // Enable pullup on trigger button
 
+#ifdef ENCODERSTEPS
+  // To use a rotary encoder rather than timer, connect one output
+  // of encoder to Arduino pin 5, make sure ledPin[] array does not
+  // use this as an output.  A small capacitor across the encoder
+  // pins can help for debouncing.
+  TCCR1A = _BV(WGM11) | _BV(WGM10);
+  TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS12) | _BV(CS11);
+#else
   // Set up Timer1 for 64:1 prescale (250 KHz clock source),
   // fast PWM mode, no PWM out.
   TCCR1A = _BV(WGM11) | _BV(WGM10);
@@ -153,6 +172,7 @@ void setup() {
   // normal...using an interrupt, the code would clobber itself.
   // By polling instead, worst case is a slight glitch where the
   // corresponding line will be a little thicker than normal.
+#endif
 
   // Disable Timer0 interrupt for smoother playback
   TIMSK0 = 0;
@@ -175,10 +195,15 @@ void loop() {
 
   while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
+#ifdef ENCODERSTEPS
+  TCNT1 = 0;
+  OCR1A = ENCODERSTEPS;
+#else
   uint32_t linesPerSec = map(analogRead(SPEED), 0, 1023, 10, maxLPS);
   Serial.println(linesPerSec);
 
   OCR1A = (F_CPU / 64) / linesPerSec;    // Timer1 interval
+#endif
 
   for(;;) {
     while(!(TIFR1 & _BV(TOV1)));         // Wait for Timer1 overflow
@@ -305,7 +330,9 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
           // Clear ledBuf on each row so conversion can just use OR ops (no masking)
           memset((void *)ledBuf, 0, N_LEDS * 3);
 
-          uint8_t seg              = ledStartColumn / (N_LEDS / 4);         // First segment
+          uint8_t seg              = ledStartColumn / (N_LEDS / 4),         // First segment
+                  loMask           = 0x01 << seg,                           // Segment bitmask in low nybble
+                  hiMask           = 0x10 << seg;                           // Segment bitmask in high nybble
           int     ledColumn        = ledStartColumn - (seg * (N_LEDS / 4)), // First LED within segment
                   columnsRemaining = columns;
 
@@ -321,7 +348,7 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
 
             for(uint8_t *bmpPtr = bmpBuf; columnsToProcess--; ledColumn++) { // For each column...
               // Determine starting address (in ledBuf) for this pixel
-              uint8_t *ledPtr = (uint8_t *)&ledBuf[12 * ((seg < 2) ?
+              uint8_t *ledPtr = (uint8_t *)&ledBuf[12 * ((loMask < 0x04) ?
                 ((N_LEDS / 4) - 1 - ledColumn) : // First half of display - strips are reversed
                                     ledColumn)]; // Second half of display - strips are forward
 
@@ -335,22 +362,22 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
                 pixel[NEO_GREEN] = pgm_read_byte(&gamma[*bmpPtr++]);
                 pixel[NEO_RED]   = pgm_read_byte(&gamma[*bmpPtr++]);
               }
-
               // Process 3 color bytes, turning sideways, MSB first
               for(uint8_t color=0; color<3; color++) {
                 uint8_t p = pixel[color], // G, R, B
                         b = 0x80;
                 do {
-                  if(p & b) *ledPtr |= ledMaskA[seg]; // Bits 7, 5, 3, 1
+                  if(p & b) *ledPtr |= loMask; // Low nybble  = bits 7, 5, 3, 1
                   b >>= 1;
-                  if(p & b) *ledPtr |= ledMaskB[seg]; // Bits 6, 4, 2, 0
+                  if(p & b) *ledPtr |= hiMask; // High nybble = bits 6, 4, 2, 0
                   b >>= 1;
                   ledPtr++;
                 } while(b);
               } // Next color byte
             } // Next column
             ledColumn = 0; // Reset; always 0 on subsequent columns
-            seg++;
+            loMask <<= 1;
+            hiMask <<= 1;
           } // Next segment
 
           // Dirty rotten pool: the SD card block size is always 512 bytes.
@@ -489,45 +516,55 @@ static void show(uint8_t *ptr) {
   uint16_t i  = N_LEDS * 3;
   uint8_t  hi = *ledPort |  ledPortMask,
            lo = *ledPort & ~ledPortMask,
-           b, next;
+           b,     // Current data byte from ptr
+           *lptr; // Pointer into ledMask[]
 
-    // 20 inst. clocks per bit: HHHHHxxxxxxxxLLLLLLL
-    // ST instructions:         ^    ^       ^       (T=0,5,13+20,25,33)
+  for(b=0; b<16; b++) {
+    ledMask[b] = (ledMask[b] & ledPortMask) | lo;
+  }
 
-  asm volatile (
-   "NeoX4_%=:"                "\n\t" // Clk  Pseudocode
-    "ld   %[b]    , %a[ptr]+" "\n\t" // 2    b     = *ptr++        (T =  0, 40)
-    "st   %a[port], %[hi]"    "\n\t" // 2   *port  = hi            (T =  2)
-    "mov  %[next] , %[b]"     "\n\t" // 1    next  = b             (T =  3)
-    "and  %[next] , %[mask]"  "\n\t" // 1    next &= mask          (T =  4)
-    "or   %[next] , %[lo]"    "\n\t" // 1    next |= lo            (T =  5)
-    "st   %a[port], %[next]"  "\n\t" // 2   *port  = next          (T =  7)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T =  9)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 11)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 13)
-    "st   %a[port], %[lo]"    "\n\t" // 2   *port  = lo            (T = 15)
-    "swap %[b]"               "\n\t" // 1    b     = (b<<4)|(b>>4) (T = 16)
-    "and  %[b]    , %[mask]"  "\n\t" // 1    b    &= mask          (T = 17)
-    "or   %[b]    , %[lo]"    "\n\t" // 1    b    |= lo            (T = 18)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 20)
-    "st   %a[port], %[hi]"    "\n\t" // 2   *port  = hi            (T = 22)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 24)
-    "nop"                     "\n\t" // 1    nop                   (T = 25)
-    "st   %a[port], %[b]"     "\n\t" // 2   *port  = b             (T = 27)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 29)
-    "rjmp .+0"                "\n\t" // 2    nop nop               (T = 31)
-    "sbiw %[i]    , 1"        "\n\t" // 2    i--                   (T = 33)
-    "st   %a[port], %[lo]"    "\n\t" // 2   *port  = lo            (T = 35)
-    "nop"                     "\n\t" // 1    nop                   (T = 36)
-    "brne NeoX4_%="           "\n"   // 2    if(i) goto NeoX4      (T = 38)
+  // 20 inst. clocks per bit: HHHHHxxxxxxxxLLLLLLL
+  // ST instructions:         ^    ^       ^       (T=0,5,13+20,25,33)
+
+  asm volatile (                               // Clk  Pseudocode
+    "ld   %[b]       , %a[ptr]+"        "\n\t" //     b    = *ptr++                      Queue up first byte,
+    "mov  %A[lptr]   , %[b]"            "\n\t" //     LSB  = b                           start masking
+    "andi %A[lptr]   , 0x0F"            "\n\t" //     LSB &= 0x0F                        low nybble for
+    "clr  %B[lptr]"                     "\n\t" //     MSB  = 0                           ledMask lookup.
+   "NeoX4_%=:"                          "\n\t" //                          (T =  0, 40)  For each byte...
+    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T =  2)      All NeoPixel pins high.
+    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T =  3)      Get pointer to next pin
+    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T =  4)      state from ledMask array.
+    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T =  5)      Load next pin state.
+    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T =  7)      Send to PORT.
+    "swap %[b]"                         "\n\t" // 1   b    = (b<<4)|(b>>4) (T =  8)      Swap high/low nybbles.
+    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T =  9)      Mask low nybble for
+    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 10)      next lookup.
+    "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 11)
+    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T = 12)      Get pointer for later
+    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T = 13)      pin state.
+    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 15)      All NeoPixel pins low.
+    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T = 16)      Load next pin state.
+    "ld   %[b]       , %a[ptr]+"        "\n\t" // 2   b    = *ptr++        (T = 18)      Queue next byte.
+    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T = 19)
+    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 20)      Mask low nybble.
+    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T = 22)      All NeoPixel pins high.
+    "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 23)
+    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 25)
+    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T = 27)      Issue next pin state.
+    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 29)
+    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 31)
+    "sbiw %[i]       , 1"               "\n\t" // 2   i--                  (T = 33)
+    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 35)      All NeoPixel pins low.
+    "nop"                               "\n\t" // 1   nop                  (T = 36)
+    "brne NeoX4_%="                     "\n"   // 2   if(i) goto NeoX4     (T = 38)
     : [port]  "+e" (ledPort),
       [b]     "+r" (b),
-      [next]  "+r" (next),
-      [i] "+w" (i)
+      [i]     "+w" (i)
     : [ptr]   "e" (ptr),
+      [lptr]  "e" (lptr),
       [hi]    "r" (hi),
-      [lo]    "r" (lo),
-      [mask]  "r" (ledPortMask));
+      [lo]    "r" (lo));
 
   interrupts();
 
