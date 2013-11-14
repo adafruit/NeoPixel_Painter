@@ -1,80 +1,82 @@
-// Adafruit NeoPixel Light Painter sketch:
-// Reads 24-bit BMP image from SD card, plays back on 4 NeoPixel
-// strips arranged in a continuous line.
+// ADAFRUIT NEOPIXEL LIGHT PAINTER SKETCH: Reads 24-bit BMP image from
+// SD card, plays back on 4 NeoPixel strips arranged in a continuous line.
 
-// Requires a momentary pushbutton connected between pin A1 and GND
-// to trigger playback.  An analog pot (e.g. 10K) connected to A0
-// sets the brightness at startup and the playback speed each time
-// the trigger is tapped.  BRIGHTNESS IS SET ONLY AT STARTUP; can't
-// adjust this in realtime, not fast enough.  To change brightness,
-// set dial & tap reset.  Adjustment takes place during conversion.
-// Then set dial for playback speed.
+// As written, requires a momentary pushbutton connected between pin A1
+// and GND to trigger playback.  An analog potentiometer connected to A0
+// sets the brightness at startup and the playback speed each time the
+// trigger is tapped.  BRIGHTNESS IS SET ONLY AT STARTUP; can't adjust
+// this in realtime, not fast enough.  To change brightness, set dial
+// and tap reset.  Then set dial for playback speed.
 
-// This is a 'plain vanilla' example, with no UI or anything -- it
-// always reads a fixed file at startup (paint.bmp, in root folder),
-// outputs paint.tmp (warning: doesn't ask, just overwrites it),
-// then plays back from this file each time a button is tapped (or
-// loops repeatedly if held).  Core pieces are here for developing
-// more advanced cases: applications could add a UI (e.g. 16x2 LCD
-// shield), process multiple files for animation, or use a rotary
-// encoder for absolute positioning.  None of that is here though,
-// you will need to get clever and rip up some of this code.
+// This is a 'plain vanilla' example with no UI or anything -- it always
+// reads a fixed file at startup (paint.bmp in root folder), outputs
+// paint.tmp (warning: doesn't ask, just overwrites it), then plays back
+// from this file each time button is tapped (repeating in loop if held).
+// More advanced applications could add a UI (e.g. 16x2 LCD shield) or
+// process multiple files for animation.  NONE OF THAT IS HERE THOUGH,
+// you will need to get clever and rip up some of this code for such.
 
 // Implementation is closely tailored to the Arduino Uno or similar
-// boards; this WILL NOT WORK with 'soft' SPI on the Arduino Mega,
-// and the use of AVR-specific registers means this won't work on
-// the Due.  On a good day it could perhaps be adapted to Teensy 2.0
-// or other AVR Arduino-type boards that support SD cards and can
-// meet the pin requirements.  Easiest by far just to use an Uno.
+// boards; this WILL NOT WORK with 'soft' SPI on the Arduino Mega, and
+// the use of AVR-specific registers means this won't work on the Due.
+// On a good day it could perhaps be adapted to Teensy 2.0 or other AVR
+// Arduino-type boards that support SD cards and can meet the pin
+// requirements.  Easiest by far just to use an Uno.  There are other
+// constraints explained further into the code.
+
+// Written by Phil Burgess / Paint Your Dragon for Adafruit Industries.
+// MIT license.
+
+// Adafruit invests time and resources providing this open source code,
+// please support Adafruit and open-source hardware by purchasing
+// products from Adafruit!
 
 #include <SD.h>
 #include <avr/pgmspace.h>
+#include "./gamma.h"
 
-// CONFIGURABLE STUFF ----------------------------------------------
+// CONFIGURABLE STUFF --------------------------------------------------------
 
-#define N_LEDS      144 // MUST be multiple of 4, max value of 168
-#define CARD_SELECT  10 // SD card select pin
-#define SPEED        A0 // Speed-setting dial
-#define BRIGHTNESS   A0 // Brightness-setting dial
-#define TRIGGER      A1 // Playback trigger pin
-// Define ENCODERSTEPS to use rotary encoder rather than timer
-// to advance each line.  The encoder MUST be on digital pin 5.
-//#define ENCODERSTEPS 10 // # of steps needed to advance 1 line
+#define N_LEDS       144 // MUST be multiple of 4, max value of 168
+#define CARD_SELECT   10 // SD card select pin
+#define SPEED         A0 // Speed-setting dial
+#define BRIGHTNESS    A0 // Brightness-setting dial
+#define TRIGGER       A1 // Playback trigger pin
+#define CURRENT_MAX 4000 // Max current from power supply (mA)
+// The software does its best to limit the LED brightness to a level that's
+// manageable by the power supply.  144 NeoPixels at full brightness can
+// draw about 10 Amps(!), while the UBEC (buck converter) sold by Adafruit
+// can provide up to 3A continuous, or up to 5A for VERY BRIEF intervals.
+// The default CURRENT_MAX setting splits the difference, figuring light
+// painting tends to run for short periods and/or that not every scanline
+// will demand equal current.  For extremely long or bright images, this
+// may exceed the UBEC's capabilities, in which case it shuts down (will
+// need to disconnect battery).  If you encounter this situation, set
+// CURRENT_MAX to value closer to 3000.  Alternately, two UBECs can be
+// used in parallel -- each connected to 1/2 of the NeoPixel strips
+// (connect the grounds together, but NOT the +5V outputs), and
+// CURRENT_MAX can then be bumped up to 6000 mA.
+
 const uint8_t PROGMEM ledPin[4] = { 3, 4, 6, 7 };
-// Display is split into four equal segments, each connected to a
-// different pin (listed in above array).  The 4 pins MUST be on the
-// same PORT register, but don't necessarily need to be adjacent.
-// Segments are placed left-to-right, with the first two segments
-// reversed (first pixel at right) in order to minimize wire lengths
-// (Arduino is positioned in middle of four segments).
+// Display is split into four equal segments, each connected to a different
+// pin (listed in above array).  The 4 pins MUST be on the same PORT
+// register, but don't necessarily need to be adjacent (e.g. pin 5 is
+// skipped, more on that later).  Segments are placed left-to-right, with
+// the first two segments reversed (first pixel at right) in order to
+// minimize wire lengths (Arduino in middle of four segments):
 // <---Strip 1---< <---Strip 2---< >---Strip 3---> >---Strip 4--->
 //         Pin 3 ^         Pin 4 ^ ^ Pin 6         ^ Pin 7
-// If the image is backwards, you don't need to re-wire anything,
+// If an image displays reversed, you don't need to re-wire anything,
 // just flip the bar over.
-// Pin 5 is skipped here to allow use with encoder.
+
+// Define ENCODERSTEPS to use rotary encoder rather than timer to advance
+// each line.  The encoder MUST be on digital pin 5!
+//#define ENCODERSTEPS 10 // # of steps needed to advance 1 line
 
 
-// NON-CONFIGURABLE STUFF ------------------------------------------
+// NON-CONFIGURABLE STUFF ----------------------------------------------------
 
 #define OVERHEAD 150 // Extra microseconds for loop processing, etc.
-
-const uint8_t gamma[] PROGMEM = { // Brightness ramp for LEDs
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,
-    2,  3,  3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  4,  5,  5,  5,
-    5,  6,  6,  6,  6,  7,  7,  7,  7,  8,  8,  8,  9,  9,  9, 10,
-   10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15, 15, 16, 16,
-   17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 24, 24, 25,
-   25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 35, 36,
-   37, 38, 39, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 50,
-   51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68,
-   69, 70, 72, 73, 74, 75, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89,
-   90, 92, 93, 95, 96, 98, 99,101,102,104,105,107,109,110,112,114,
-  115,117,119,120,122,124,126,127,129,131,133,135,137,138,140,142,
-  144,146,148,150,152,154,156,158,160,162,164,167,169,171,173,175,
-  177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
-  215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255 };
 
 volatile uint8_t  ledBuf[N_LEDS * 3], // Data for NeoPixels
                  *ledPort;            // PORT register for all LEDs
@@ -88,7 +90,7 @@ uint32_t          firstBlock,         // First block # in working (temp) file
                   nBlocks;            // Number of blocks in file
 
 
-// INITIALIZATION --------------------------------------------------
+// INITIALIZATION ------------------------------------------------------------
 
 void setup() {
   uint8_t i, p, b;
@@ -134,14 +136,31 @@ void setup() {
   Serial.println(F("Volume type is FAT"));
   root.openRoot(volume);
 
-  // This is rigged for the test application: always convert 'paint.bmp'
-  // at startup, then play back each time the trigger button is pressed
-  // (or loop repeatedly if button is held down).
-  bmpConvert(root, "paint.bmp", "paint.tmp", analogRead(BRIGHTNESS) / 4);
+  // This simple application always reads the file 'paint.bmp' in the
+  // root directory; there's no file selection mechanism or UI.
+
+  // Two passes are made over the input image.  First pass estimates max
+  // brightness level that power supply can sustain...
+  b = 255;                                 // Start with max brightness
+  bmpProcess(root, "paint.bmp", NULL, &b); // b is modified to 'safe' max
+  // If one were to use multiple images for animation, best to make a pass
+  // through all the frames first, determining the minimum safe max among
+  // all of them, then adjust every image to the same brightness level.
+
+  // Read dial, setting brightness between 1 (almost but not quite off)
+  // and the previously-estimated safe max.
+  b = map(analogRead(BRIGHTNESS), 0, 1023, 1, b); // b modified again
+
+  // Second pass now applies brightness adjustment (if needed) while
+  // converting the image from BMP to an intermediate format required for
+  // this software to work (this outputs the file 'paint.tmp' -- any
+  // existing file by that name will simply be clobbered, DOES NOT ASK).
+  bmpProcess(root, "paint.bmp", "paint.tmp", &b);
 
   // Prepare for reading from file; determine first block, block count,
   // make a read pass through the file to estimate block read time (+10%
-  // margin) and max playback lines/sec.
+  // margin) and max playback lines/sec.  Not all SD cards perform the
+  // same.  This makes sure a reasonable speed limit is used.
   uint32_t fileSize = 0L;
   if(!(firstBlock = contigFile(root, "paint.tmp", &fileSize))) {
     error(F("Could not open tempfile for input"));
@@ -174,7 +193,8 @@ void setup() {
   // corresponding line will be a little thicker than normal.
 #endif
 
-  // Disable Timer0 interrupt for smoother playback
+  // Timer0 interrupt is disabled for smoother playback.
+  // This means delay(), millis(), etc. won't work.
   TIMSK0 = 0;
 }
 
@@ -189,19 +209,20 @@ void loop() {
   uint32_t block    = 0;     // Current block # within file
   boolean  stopFlag = false; // If set, stop playback loop
 
-  // Stage first block (but don't display yet --
-  // the loop below does that only when Timer1 overflows).
+  // Stage first block, but don't display yet -- the loop below
+  // does that only when Timer1 overflows.
   card.readData(firstBlock, 0, sizeof(ledBuf), (uint8_t *)ledBuf);
 
   while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
 #ifdef ENCODERSTEPS
+  // Set up for rotary encoder
   TCNT1 = 0;
   OCR1A = ENCODERSTEPS;
 #else
+  // Set up timer based on dial input
   uint32_t linesPerSec = map(analogRead(SPEED), 0, 1023, 10, maxLPS);
   Serial.println(linesPerSec);
-
   OCR1A = (F_CPU / 64) / linesPerSec;    // Timer1 interval
 #endif
 
@@ -229,33 +250,46 @@ void loop() {
 }
 
 
-// BMP->NEOPIXEL FILE CONVERSION -----------------------------------
+// BMP->NEOPIXEL FILE CONVERSION ---------------------------------------------
 
-#define NEO_GREEN 0 // NeoPixel color component order
-#define NEO_RED   1
-#define NEO_BLUE  2
+#define NEO_GREEN 0 // BMP and NeoPixels have color components in
+#define NEO_RED   1 // different orders.  These indices are for
+#define NEO_BLUE  2 // processing the current NeoPixel data.
 
-// Convert file from 24-bit Windows BMP format to the 4-way parallel
-// NeoPixel datastream.  Conversion is bottom-to-top (see notes
-// below)...for horizontal light painting, the image is NOT rotated
-// here (the per-pixel file seeking this requires takes FOREVER on
-// the Arduino).  Instead, such images should be rotated
-// counterclockwise on computer prior to transferring to SD card.
-// As currently written, both the input and output files need to be
-// in the same directory.
-// Brightness is set during conversion; there aren't enough cycles
-// to do this in realtime during playback.  To change brightness,
-// re-convert image with new brightness setting.
-boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness) {
+// Convert file from 24-bit Windows BMP format to the 4-way parallel NeoPixel
+// datastream.  Conversion is bottom-to-top (see notes below)...for
+// horizontal light painting, the image is NOT rotated here (the per-pixel
+// file seeking this requires takes FOREVER on the Arduino).  Instead, such
+// images should be rotated counterclockwise (in Photoshop or other editor)
+// prior to transferring to SD card.  As currently written, both the input
+// and output files need to be in the same directory.  Brightness is set
+// during conversion; there aren't enough cycles to do this in realtime
+// during playback.  To change brightness, re-process image with new
+// brightness setting.
+boolean bmpProcess(
+  SdFile  &path,
+  char    *inFile,
+  char    *outFile,
+  uint8_t *brightness) {
 
-  SdFile   bmpFile;              // Windows BMP file for input
-  boolean  goodBmp   = false;    // True on valid BMP header parse
-  int      bmpWidth, bmpHeight;  // W, H in pixels
-  uint16_t b16;                  // 16-bit dup of brightness+1
-  uint32_t bmpImageoffset,       // Start of image data in BMP file
-           startTime = millis();
+  SdFile    bmpFile;              // Windows BMP file for input
+  boolean   goodBmp    = false;   // 'true' on valid BMP header parse
+  int       bmpWidth, bmpHeight;  // W, H in pixels
+  uint8_t  *ditherRow,            // 16-element dither array for current row
+            b;                    // 1 + *brightness
+  uint16_t  b16;                  // 16-bit dup of b
+  uint32_t  bmpImageoffset,       // Start of image data in BMP file
+            lineMax    = 0L,      // Cumulative brightness of brightest line
+            startTime  = millis();
 
-  Serial.print(F("Loading image '"));
+  if(brightness) {
+    b = 1 + *brightness;          // Wraps around, fun with maths
+  } else {
+    // If estimating brightness (outfile = NULL), MUST pass brightness pointer
+    if(NULL == outFile) return false;
+    b = 0;
+  }
+  Serial.print(F("Reading file '"));
   Serial.print(inFile);
   Serial.print(F("'..."));
   if(NULL == bmpFile.open(path, inFile, O_RDONLY)) {
@@ -287,92 +321,109 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
       uint32_t firstBlock,
                convertedSize = 512L * bmpHeight;
 
-      if(firstBlock = contigFile(path, outFile, &convertedSize)) { // File created?
+      if((NULL == outFile) ||                         // Estimating current?
+         (firstBlock = contigFile(path, outFile,      // or
+          &convertedSize))) {                         // File created?
 
-        uint8_t bmpBuf[(N_LEDS / 4) * 3],             // 1/4 scanline from input file
-                pixel[3];                             // Current pixel bring procesed
-        uint32_t rowSize = ((bmpWidth * 3) + 3) & ~3; // BMP rows padded to 4 bytes
+        uint8_t  bmpBuf[(N_LEDS / 4) * 3],            // 1/4 row from file
+                 pixel[3];                            // Current pixel buf
+        uint32_t rowSize = ((bmpWidth * 3) + 3) & ~3; // BMP row w/4 byte pad
+        boolean  flip    = false;
 
-        boolean flip = false;
         if(bmpHeight < 0) {        // If bmpHeight is negative,
           bmpHeight  = -bmpHeight; // image is in top-down order.
-          flip       = true;       // Not canon, but has been observed in the wild.
+          flip       = true;       // Rare, but happens.
         }
 
-        int bmpStartColumn, ledStartColumn, columns;
+        int bmpStartCol, ledStartCol, columns;
         if(bmpWidth >= N_LEDS) { // BMP matches LED bar width, or crop image
-          bmpStartColumn = (bmpWidth - N_LEDS) / 2;
-          ledStartColumn = 0;
+          bmpStartCol = (bmpWidth - N_LEDS) / 2;
+          ledStartCol = 0;
           columns        = N_LEDS;
         } else {                 // Letterbox narrow image within LED bar
-          bmpStartColumn = 0;
-          ledStartColumn = (N_LEDS - bmpWidth) / 2;
+          bmpStartCol = 0;
+          ledStartCol = (N_LEDS - bmpWidth) / 2;
           columns        = bmpWidth;
         }
 
-        brightness++; // Rollover OK, fun with math!
-        b16 = (int)brightness;
+        b16 = (int)b;
 
-        Serial.print(F("Converting..."));
+        Serial.print(F("Processing..."));
         for(int row=0; row<bmpHeight; row++) { // For each image row...
           Serial.write('.');
-  
           // Image is converted from bottom to top.  This is on purpose!
           // The ground (physical ground, not the electrical kind) provides
           // a uniform point of reference for multi-frame vertical painting...
           // could then use something like a leaf switch to trigger playback,
           // lifting the light bar like making giant soap bubbles.
+
           // Seek to first pixel to load for this row...
-          bmpFile.seekSet(bmpImageoffset + (bmpStartColumn * 3) + (rowSize * (flip ?
+          bmpFile.seekSet(
+            bmpImageoffset + (bmpStartCol * 3) + (rowSize * (flip ?
             (bmpHeight - 1 - row) : // Image is stored top-to-bottom
             row)));                 // Image stored bottom-to-top (normal BMP)
   
-          // Clear ledBuf on each row so conversion can just use OR ops (no masking)
+          // Clear ledBuf on each row so just OR ops can be used (no masking)
           memset((void *)ledBuf, 0, N_LEDS * 3);
 
-          uint8_t seg              = ledStartColumn / (N_LEDS / 4),         // First segment
-                  loMask           = 0x01 << seg,                           // Segment bitmask in low nybble
-                  hiMask           = 0x10 << seg;                           // Segment bitmask in high nybble
-          int     ledColumn        = ledStartColumn - (seg * (N_LEDS / 4)), // First LED within segment
-                  columnsRemaining = columns;
+          ditherRow = (uint8_t *)&dither[row & 0x0F];
 
-          while(columnsRemaining) {                              // For each segment...
-            uint8_t columnsToProcess = (N_LEDS / 4) - ledColumn; // Columns within segment
-            if(columnsToProcess > columnsRemaining)
-               columnsToProcess = columnsRemaining;              //  Clip right (narrow BMP)
+          uint8_t  seg       = ledStartCol /
+                               (N_LEDS / 4), // First segment
+                   loMask    = 0x01 << seg,  // Segment bitmask in low nybble
+                   hiMask    = 0x10 << seg,  // Segment bitmask in high nybble
+                   d,                        // Dither value for row/column
+                   color,                    // Color component index (R/G/B)
+                  *ledPtr,                   // Pointer into ledBuf
+                  *bmpPtr;                   // Pointer into bmpBuf
+          int      ledColumn = ledStartCol -
+                               (seg * (N_LEDS / 4)), // First LED in segment
+                   dCol      = ledStartCol,  // Ordered dither column
+                   colsToGo  = columns;      // Work remaining
+          uint32_t sum = 0L;                 // Sum of pixels in row
 
-            if(!bmpFile.read(bmpBuf, columnsToProcess * 3))      // Load segment
+          while(colsToGo) {                  // For each segment...
+            uint8_t columnsToProcess =
+                    (N_LEDS / 4) - ledColumn;// Columns within segment
+            if(columnsToProcess > colsToGo)
+               columnsToProcess = colsToGo;  //  Clip right (narrow BMP)
+
+            if(!bmpFile.read(bmpBuf, columnsToProcess * 3)) // Load segment
               Serial.println(F("Read error"));
-
-            columnsRemaining -= columnsToProcess;
-
-            for(uint8_t *bmpPtr = bmpBuf; columnsToProcess--; ledColumn++) { // For each column...
+            colsToGo -= columnsToProcess;
+            for(bmpPtr = bmpBuf; columnsToProcess--;
+              ledColumn++) {                 // For each column...
               // Determine starting address (in ledBuf) for this pixel
-              uint8_t *ledPtr = (uint8_t *)&ledBuf[12 * ((loMask < 0x04) ?
-                ((N_LEDS / 4) - 1 - ledColumn) : // First half of display - strips are reversed
-                                    ledColumn)]; // Second half of display - strips are forward
+              ledPtr = (uint8_t *)&ledBuf[12 * ((loMask < 0x04) ?
+                ((N_LEDS / 4) - 1 - ledColumn) : // First half - reversed LEDs
+                                    ledColumn)]; // Second half - forward LEDs
+              d = pgm_read_byte(&ditherRow[dCol++ & 0x0F]); // Dither value
 
               // Reorder BMP BGR to NeoPixel GRB
-              if(brightness) {
-                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
-                pixel[NEO_GREEN] = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
-                pixel[NEO_RED]   = pgm_read_byte(&gamma[(*bmpPtr++ * b16) >> 8]);
+              if(b) {
+                pixel[NEO_BLUE]  = (*bmpPtr++ * b16) >> 8;
+                pixel[NEO_GREEN] = (*bmpPtr++ * b16) >> 8;
+                pixel[NEO_RED]   = (*bmpPtr++ * b16) >> 8;
               } else {
-                pixel[NEO_BLUE]  = pgm_read_byte(&gamma[*bmpPtr++]);
-                pixel[NEO_GREEN] = pgm_read_byte(&gamma[*bmpPtr++]);
-                pixel[NEO_RED]   = pgm_read_byte(&gamma[*bmpPtr++]);
+                pixel[NEO_BLUE]  = *bmpPtr++;
+                pixel[NEO_GREEN] = *bmpPtr++;
+                pixel[NEO_RED]   = *bmpPtr++;
               }
+
               // Process 3 color bytes, turning sideways, MSB first
-              for(uint8_t color=0; color<3; color++) {
-                uint8_t p = pixel[color], // G, R, B
-                        b = 0x80;
+              for(color=0; color<3; color++) {
+                uint8_t raw  = pixel[color],               // 'Raw' G,R,B
+                        corr = pgm_read_byte(&gamma[raw]), // Gamma-corrected
+                        bb   = 0x80;                       // Current bit
+                if(pgm_read_byte(&bump[raw]) > d) corr++;  // Dither up?
+                sum += corr;                               // Total brightness
                 do {
-                  if(p & b) *ledPtr |= loMask; // Low nybble  = bits 7, 5, 3, 1
-                  b >>= 1;
-                  if(p & b) *ledPtr |= hiMask; // High nybble = bits 6, 4, 2, 0
-                  b >>= 1;
+                  if(corr & bb) *ledPtr |= loMask; // Bits 7, 5, 3, 1
+                  bb >>= 1;
+                  if(corr & bb) *ledPtr |= hiMask; // Bits 6, 4, 2, 0
+                  bb >>= 1;
                   ledPtr++;
-                } while(b);
+                } while(bb);
               } // Next color byte
             } // Next column
             ledColumn = 0; // Reset; always 0 on subsequent columns
@@ -380,26 +431,29 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
             hiMask <<= 1;
           } // Next segment
 
-          // Dirty rotten pool: the SD card block size is always 512 bytes.
-          // ledBuf will always be slightly smaller than this, yet we write
-          // a full 512 bytes starting from this address (in order to save
-          // RAM...in very short supply here...ledBuf is not padded to the
-          // full 512 bytes).  This means random residue from the heap (or
-          // whatever follows ledBuf in memory) is written to the file at
-          // the end of every block.  This is okay for our application
-          // because the other code that reads from this file is also using
-          // block reads, and only uses the first N_LEDS * 3 bytes from
-          // each block; the garbage is ignored.  This would be an
-          // inexcusable transgression in a 'normal' application (sensitive
-          // information in RAM could get written to the card) and would
-          // totally land you an 'F' in CompSci, so don't look at this as a
-          // good programming model, it's just a dirty MCU hack to save RAM
-          // for a trifle application.  Tomfoolery hereby acknowledged.
+          if(outFile) {
+            // Dirty rotten pool: the SD card block size is always 512 bytes.
+            // ledBuf will always be slightly smaller than this, yet we write
+            // a full 512 bytes starting from this address (in order to save
+            // RAM...in very short supply here...ledBuf is not padded to the
+            // full 512 bytes).  This means random residue from the heap (or
+            // whatever follows ledBuf in memory) is written to the file at
+            // the end of every block.  This is okay for our application
+            // because the other code that reads from this file is also using
+            // block reads, and only uses the first N_LEDS * 3 bytes from
+            // each block; the garbage is ignored.  This would be an
+            // inexcusable transgression in a 'normal' application (sensitive
+            // information in RAM could get written to the card) and would
+            // totally land you an 'F' in CompSci, so don't look at this as a
+            // good programming model, it's just a dirty MCU hack to save RAM
+            // for a trifle application.  Tomfoolery hereby acknowledged.
 
-          // Using regular block writes; tried multi-block sequence write
-          // but it wouldn't play nice.  No biggie, still plenty responsive.
-          if(!card.writeBlock(firstBlock + row, (uint8_t *)ledBuf))
-            Serial.println(F("Write error"));
+            // Using regular block writes; tried multi-block sequence write
+            // but it wouldn't play nice.  No biggie, still plenty responsive.
+            if(!card.writeBlock(firstBlock + row, (uint8_t *)ledBuf))
+              Serial.println(F("Write error"));
+          }
+          if(sum > lineMax) lineMax = sum;
 
         } // Next row
         Serial.println(F("OK"));
@@ -410,19 +464,29 @@ boolean bmpConvert(SdFile &path, char *inFile, char *outFile, uint8_t brightness
         Serial.println("'");
       }
 
-      Serial.print(F("Converted in "));
+      Serial.print(F("Processed in "));
       Serial.print(millis() - startTime);
-      Serial.println(" ms");
+      Serial.println(F(" ms"));
     } // end goodBmp
   } // end bmp signature
 
+  if(goodBmp) {
+    if(brightness) {
+      lineMax = (lineMax * 20) / 255; // Est current @ ~20 mA/LED
+      if(lineMax > CURRENT_MAX) {
+        // Estimate suitable brightness based on CURRENT_MAX
+        *brightness = (*brightness * (uint32_t)CURRENT_MAX) / lineMax;
+      } // Else no recommended change
+    }
+  } else {
+    Serial.println(F("BMP format not recognized."));
+  }
   bmpFile.close();
-  if(!goodBmp) Serial.println(F("BMP format not recognized."));
   return goodBmp;
 }
 
 
-// FILE UTILITIES --------------------------------------------------
+// FILE UTILITIES ------------------------------------------------------------
 
 // Word (16-bit) and long (32-bit) read functions used by the BMP
 // reading function above.  These are endian-dependent and nonportable;
@@ -441,14 +505,13 @@ static uint32_t read32(SdFile &f) {
   return result;
 }
 
-// Create or access a contiguous (un-fragmented) file.  Pointer to
-// size (uint32_t) MUST be passed -- if this contains 0, existing
-// file is opened for reading and actual file size is then stored
-// here.  If a non-zero value is provided, a file of this size will
-// be created (deleting any existing file first).  Returns the
-// index of the first SD block of the file (or 0 on error).  The
-// SdFile handle is NOT returned; this is intended for raw block
-// read/write ops.
+// Create or access a contiguous (un-fragmented) file.  Pointer to size
+// (uint32_t) MUST be passed -- if this contains 0, existing file is opened
+// for reading and actual file size is then placed here.  If a non-zero
+// value is provided, a file of this size will be created (deleting any
+// existing file first).  Returns the index of the first SD block of the
+// file (or 0 on error).  The SdFile handle is NOT returned; this is
+// intended for raw block read/write ops.
 static uint32_t contigFile(SdFile &path, char *filename, uint32_t *bytes) {
 
   if(NULL == bytes) {
@@ -476,7 +539,8 @@ static uint32_t contigFile(SdFile &path, char *filename, uint32_t *bytes) {
   }
 
   uint32_t c = file.firstCluster(),
-           b = volume.dataStartBlock() + ((c - 2) << volume.clusterSizeShift());
+           b = volume.dataStartBlock() +
+               ((c - 2) << volume.clusterSizeShift());
 
   file.close();
 
@@ -496,18 +560,17 @@ static uint32_t benchmark(uint32_t block, uint32_t n) {
   return maxTime;
 }
 
-// NEOPIXEL HANDLER ------------------------------------------------
+// NEOPIXEL HANDLER ----------------------------------------------------------
 
-// The normal NeoPixel library isn't used by this project...
-// long strips proved a bigger bottleneck than SD card reading!
-// Instead, this code runs four Arduino pins in parallel, each
-// controlling one NeoPixel strip (1/4 of the total display).
-// No, this approach will not be implemented in the standard
-// NeoPixel library...it's only a benefit here because we're using
-// pre-processed data directly from the SD card.  Pixel plotting
-// in this format is considerably more complicated than with the
-// normal NeoPixel code, which would erase any performance benefit
-// in general-purpose use.  So don't ask.
+// The normal NeoPixel library isn't used by this project...long strips
+// proved a bigger bottleneck than SD card reading!  Instead, this code
+// runs four Arduino pins in parallel, each controlling one NeoPixel
+// strip (1/4 of the total display).  No, this approach will not be
+// implemented in the standard NeoPixel library...it's only a benefit here
+// because we're using pre-processed data directly from the SD card.
+// Pixel plotting in this format is considerably more complicated than
+// with the normal NeoPixel code, which would erase any performance benefit
+// in general-purpose use.  So don't bother.
 
 static void show(uint8_t *ptr) {
 
@@ -526,39 +589,39 @@ static void show(uint8_t *ptr) {
   // 20 inst. clocks per bit: HHHHHxxxxxxxxLLLLLLL
   // ST instructions:         ^    ^       ^       (T=0,5,13+20,25,33)
 
-  asm volatile (                               // Clk  Pseudocode
-    "ld   %[b]       , %a[ptr]+"        "\n\t" //     b    = *ptr++                  Queue up first byte,
-    "mov  %A[lptr]   , %[b]"            "\n\t" //     LSB  = b                       start masking
-    "andi %A[lptr]   , 0x0F"            "\n\t" //     LSB &= 0x0F                    low nybble for
-    "clr  %B[lptr]"                     "\n\t" //     MSB  = 0                       ledMask lookup.
-   "NeoX4_%=:"                          "\n\t" //                          (T =  0)  For each byte...
-    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T =  2)  All NeoPixel pins high.
-    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T =  3)  Get pointer to next pin
-    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T =  4)  state from ledMask array.
-    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T =  5)  Load next pin state.
-    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T =  7)  Send to PORT.
-    "swap %[b]"                         "\n\t" // 1   b    = (b<<4)|(b>>4) (T =  8)  Swap high/low nybbles.
-    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T =  9)  Mask low nybble for
-    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 10)  next lookup.
-    "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 11)
-    "subi %A[lptr]   , lo8(-(ledMask))" "\n\t" // 1   lptr = ledMask[LSB]  (T = 12)  Get pointer for later
-    "sbci %B[lptr]   , hi8(-(ledMask))" "\n\t" // 1                        (T = 13)  pin state.
-    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 15)  All NeoPixel pins low.
-    "ld   __tmp_reg__, %a[lptr]"        "\n\t" // 1   tmp  = *lptr         (T = 16)  Load next pin state.
-    "ld   %[b]       , %a[ptr]+"        "\n\t" // 2   b    = *ptr++        (T = 18)  Queue next byte.
-    "mov  %A[lptr]   , %[b]"            "\n\t" // 1   LSB  = b             (T = 19)
-    "andi %A[lptr]   , 0x0F"            "\n\t" // 1   LSB &= 0x0F          (T = 20)  Mask low nybble.
-    "st   %a[port]   , %[hi]"           "\n\t" // 2  *port = hi            (T = 22)  All NeoPixel pins high.
-    "clr  %B[lptr]"                     "\n\t" // 1   MSB  = 0             (T = 23)
-    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 25)
-    "st   %a[port]   , __tmp_reg__"     "\n\t" // 2  *port = tmp           (T = 27)  Issue next pin state.
-    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 29)
-    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 31)
-    "sbiw %[i]       , 1"               "\n\t" // 2   i--                  (T = 33)
-    "st   %a[port]   , %[lo]"           "\n\t" // 2  *port = lo            (T = 35)  All NeoPixel pins low.
-    "nop"                               "\n\t" // 1   nop                  (T = 36)
-    "rjmp .+0"                          "\n\t" // 2   nop nop              (T = 38)
-    "brne NeoX4_%="                     "\n"   // 2   if(i) goto NeoX4     (T = 40)
+  asm volatile (                            // Clk, Pseudocode
+    "ld   %[b]       , %a[ptr]+"     "\n\t" //    b    = *ptr++
+    "mov  %A[lptr]   , %[b]"         "\n\t" //    LSB  = b
+    "andi %A[lptr]   , 0x0F"         "\n\t" //    LSB &= 0x0F
+    "clr  %B[lptr]"                  "\n\t" //    MSB  = 0
+   "NeoX4_%=:"                       "\n\t" //                        (T =  0)
+    "st   %a[port]   , %[hi]"        "\n\t" // 2 *port = hi           (T =  2)
+    "subi %A[lptr]   , lo8(-(ledMask))\n\t" // 1  lptr = ledMask[LSB] (T =  3)
+    "sbci %B[lptr]   , hi8(-(ledMask))\n\t" // 1                      (T =  4)
+    "ld   __tmp_reg__, %a[lptr]"     "\n\t" // 1  tmp  = *lptr        (T =  5)
+    "st   %a[port]   , __tmp_reg__"  "\n\t" // 2 *port = tmp          (T =  7)
+    "swap %[b]"                      "\n\t" // 1                      (T =  8)
+    "mov  %A[lptr]   , %[b]"         "\n\t" // 1  LSB  = b            (T =  9)
+    "andi %A[lptr]   , 0x0F"         "\n\t" // 1  LSB &= 0x0F         (T = 10)
+    "clr  %B[lptr]"                  "\n\t" // 1  MSB  = 0            (T = 11)
+    "subi %A[lptr]   , lo8(-(ledMask))\n\t" // 1  lptr = ledMask[LSB] (T = 12)
+    "sbci %B[lptr]   , hi8(-(ledMask))\n\t" // 1                      (T = 13)
+    "st   %a[port]   , %[lo]"        "\n\t" // 2 *port = lo           (T = 15)
+    "ld   __tmp_reg__, %a[lptr]"     "\n\t" // 1  tmp  = *lptr        (T = 16)
+    "ld   %[b]       , %a[ptr]+"     "\n\t" // 2  b    = *ptr++       (T = 18)
+    "mov  %A[lptr]   , %[b]"         "\n\t" // 1  LSB  = b            (T = 19)
+    "andi %A[lptr]   , 0x0F"         "\n\t" // 1  LSB &= 0x0F         (T = 20)
+    "st   %a[port]   , %[hi]"        "\n\t" // 2 *port = hi           (T = 22)
+    "clr  %B[lptr]"                  "\n\t" // 1  MSB  = 0            (T = 23)
+    "rjmp .+0"                       "\n\t" // 2  nop nop             (T = 25)
+    "st   %a[port]   , __tmp_reg__"  "\n\t" // 2  *port = tmp         (T = 27)
+    "rjmp .+0"                       "\n\t" // 2   nop nop            (T = 29)
+    "rjmp .+0"                       "\n\t" // 2   nop nop            (T = 31)
+    "sbiw %[i]       , 1"            "\n\t" // 2   i--                (T = 33)
+    "st   %a[port]   , %[lo]"        "\n\t" // 2  *port = lo          (T = 35)
+    "nop"                            "\n\t" // 1   nop                (T = 36)
+    "rjmp .+0"                       "\n\t" // 2   nop nop            (T = 38)
+    "brne NeoX4_%="                  "\n"   // 2   if(i) goto NeoX4   (T = 40)
     : [port]  "+e" (ledPort),
       [b]     "+r" (b),
       [i]     "+w" (i)
@@ -572,4 +635,3 @@ static void show(uint8_t *ptr) {
   // There's no explicit 50 uS delay here as with most NeoPixel code;
   // SD card block read provides ample time for latch!
 }
-
