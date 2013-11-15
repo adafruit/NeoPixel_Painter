@@ -96,6 +96,7 @@ void setup() {
   uint8_t i, p, b;
 
   Serial.begin(57600);
+  digitalWrite(TRIGGER, HIGH);             // Enable pullup on trigger button
 
   for(ledPortMask = i = 0; i<4; i++) {     // NeoPixel pin setup:
     p = pgm_read_byte(&ledPin[i]);         // Arduino pin number
@@ -139,23 +140,27 @@ void setup() {
   // This simple application always reads the file 'paint.bmp' in the
   // root directory; there's no file selection mechanism or UI.
 
-  // Two passes are made over the input image.  First pass estimates max
-  // brightness level that power supply can sustain...
-  b = 255;                                 // Start with max brightness
-  bmpProcess(root, "paint.bmp", NULL, &b); // b is modified to 'safe' max
-  // If one were to use multiple images for animation, best to make a pass
-  // through all the frames first, determining the minimum safe max among
-  // all of them, then adjust every image to the same brightness level.
-
-  // Read dial, setting brightness between 1 (almost but not quite off)
-  // and the previously-estimated safe max.
-  b = map(analogRead(BRIGHTNESS), 0, 1023, 1, b); // b modified again
-
-  // Second pass now applies brightness adjustment (if needed) while
-  // converting the image from BMP to an intermediate format required for
-  // this software to work (this outputs the file 'paint.tmp' -- any
-  // existing file by that name will simply be clobbered, DOES NOT ASK).
-  bmpProcess(root, "paint.bmp", "paint.tmp", &b);
+  // If button is held at startup, the processing step is skipped, just
+  // goes right to playback of the prior converted file (if present).
+  if(digitalRead(TRIGGER) == HIGH) {
+    // Two passes are made over the input image.  First pass estimates max
+    // brightness level that power supply can sustain...
+    b = 255;                                 // Start with max brightness
+    bmpProcess(root, "paint.bmp", NULL, &b); // b is modified to 'safe' max
+    // If one were to use multiple images for animation, best to make a pass
+    // through all the frames first, determining the minimum safe max among
+    // all of them, then adjust every image to the same brightness level.
+  
+    // Read dial, setting brightness between 1 (almost but not quite off)
+    // and the previously-estimated safe max.
+    b = map(analogRead(BRIGHTNESS), 0, 1023, 1, b); // b modified again
+  
+    // Second pass now applies brightness adjustment (if needed) while
+    // converting the image from BMP to an intermediate format required for
+    // this software to work (this outputs the file 'paint.tmp' -- any
+    // existing file by that name will simply be clobbered, DOES NOT ASK).
+    bmpProcess(root, "paint.bmp", "paint.tmp", &b);
+  }
 
   // Prepare for reading from file; determine first block, block count,
   // make a read pass through the file to estimate block read time (+10%
@@ -170,8 +175,6 @@ void setup() {
     (((benchmark(firstBlock, nBlocks) * 11) / 10) +
      ((N_LEDS * 30L) / 4) + OVERHEAD));
   if(maxLPS > 400) maxLPS = 400; // NeoPixel PWM rate is ~400 Hz
-
-  digitalWrite(TRIGGER, HIGH);   // Enable pullup on trigger button
 
 #ifdef ENCODERSTEPS
   // To use a rotary encoder rather than timer, connect one output
@@ -239,7 +242,7 @@ void loop() {
         // set flag to stop playback after that.
         // memset() was causing inexplicable crash,
         // so clearing ledBuf manually here:
-        for(int i=0; i<sizeof(ledBuf); i++) ledBuf[i] = 0;
+        for(uint16_t i=0; i<sizeof(ledBuf); i++) ledBuf[i] = 0;
         stopFlag = true;
         continue;
       }                                  // Else trigger still held
@@ -292,7 +295,7 @@ boolean bmpProcess(
   Serial.print(F("Reading file '"));
   Serial.print(inFile);
   Serial.print(F("'..."));
-  if(NULL == bmpFile.open(path, inFile, O_RDONLY)) {
+  if(!bmpFile.open(path, inFile, O_RDONLY)) {
     Serial.println(F("not found"));
     return false;
   }
