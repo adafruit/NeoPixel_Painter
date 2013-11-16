@@ -142,7 +142,7 @@ void setup() {
 
   // If button is held at startup, the processing step is skipped, just
   // goes right to playback of the prior converted file (if present).
-  if(digitalRead(TRIGGER) == HIGH) {
+  if(digitalRead(TRIGGER) == HIGH) { // No button press
     // Two passes are made over the input image.  First pass estimates max
     // brightness level that power supply can sustain...
     b = 255;                                 // Start with max brightness
@@ -160,7 +160,7 @@ void setup() {
     // this software to work (this outputs the file 'paint.tmp' -- any
     // existing file by that name will simply be clobbered, DOES NOT ASK).
     bmpProcess(root, "paint.bmp", "paint.tmp", &b);
-  }
+  } else while(digitalRead(TRIGGER) == LOW); // Wait for button release
 
   // Prepare for reading from file; determine first block, block count,
   // make a read pass through the file to estimate block read time (+10%
