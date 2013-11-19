@@ -61,16 +61,19 @@ const uint8_t PROGMEM ledPin[4] = { 3, 4, 6, 7 };
 // Display is split into four equal segments, each connected to a different
 // pin (listed in above array).  The 4 pins MUST be on the same PORT
 // register, but don't necessarily need to be adjacent (e.g. pin 5 is
-// skipped, more on that later).  Segments are placed left-to-right, with
-// the first two segments reversed (first pixel at right) in order to
-// minimize wire lengths (Arduino in middle of four segments):
+// skipped, more on that later).  Some SD shields use pin 4 (rather than
+// pin 10) as the card select -- in this case, the ledPin array should be
+// { 2, 3, 6, 7 }, with the pixels wired accordingly.  LED strip segments
+// are placed left-to-right, with the first two segments reversed (first
+// pixel at right) in order to minimize wire lengths (Arduino in middle of
+// four segments):
 // <---Strip 1---< <---Strip 2---< >---Strip 3---> >---Strip 4--->
 //         Pin 3 ^         Pin 4 ^ ^ Pin 6         ^ Pin 7
 // If an image displays reversed, you don't need to re-wire anything,
 // just flip the bar over.
 
 // Define ENCODERSTEPS to use rotary encoder rather than timer to advance
-// each line.  The encoder MUST be on digital pin 5!
+// each line.  The encoder _MUST_ be on digital pin 5 on Arduino Uno!
 //#define ENCODERSTEPS 10 // # of steps needed to advance 1 line
 
 
@@ -93,10 +96,11 @@ uint32_t          firstBlock,         // First block # in working (temp) file
 // INITIALIZATION ------------------------------------------------------------
 
 void setup() {
-  uint8_t i, p, b;
+  uint8_t i, p, b, startupTrigger;
 
-  Serial.begin(57600);
   digitalWrite(TRIGGER, HIGH);             // Enable pullup on trigger button
+  Serial.begin(57600);
+  startupTrigger = digitalRead(TRIGGER);   // Poll startup trigger ASAP
 
   for(ledPortMask = i = 0; i<4; i++) {     // NeoPixel pin setup:
     p = pgm_read_byte(&ledPin[i]);         // Arduino pin number
@@ -142,7 +146,7 @@ void setup() {
 
   // If button is held at startup, the processing step is skipped, just
   // goes right to playback of the prior converted file (if present).
-  if(digitalRead(TRIGGER) == HIGH) { // No button press
+  if(startupTrigger == HIGH) { // No button press
     // Two passes are made over the input image.  First pass estimates max
     // brightness level that power supply can sustain...
     b = 255;                                 // Start with max brightness
