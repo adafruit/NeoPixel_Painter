@@ -1,9 +1,8 @@
 // ADAFRUIT NEOPIXEL LIGHT PAINTER SKETCH: Reads 24-bit BMP image from
 // SD card, plays back on NeoPixel strip for long-exposure photography.
 
-// Requires SdFat and NeoPixel libraries for Arduino:
+// Requires SdFat library for Arduino:
 // http://code.google.com/p/sdfatlib/
-// https://github.com/adafruit/Adafruit_NeoPixel
 
 // As written, uses a momentary pushbutton connected between pin A1 and
 // GND to trigger playback.  An analog potentiometer connected to A0 sets
@@ -34,7 +33,6 @@
 // products from Adafruit!
 
 #include <SdFat.h>
-#include <Adafruit_NeoPixel.h>
 #include <avr/pgmspace.h>
 #include "./gamma.h"
 
@@ -72,17 +70,15 @@
 
 #define OVERHEAD 150 // Extra microseconds for loop processing, etc.
 
-// The strip is always declared w/171 pixels, regardless of the number
-// actually used.  This allows the LED buffer to do double duty as the
-// SD read buffer, saving RAM and a data copying step.
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(171, LED_PIN);
-uint8_t          *ledBuf;     // -> raw NeoPixel data
+uint8_t           sdBuf[512], // One SD block (also for NeoPixel color data)
+                  pinMask;    // NeoPixel pin bitmask
 uint16_t          maxLPS;     // Max playback lines/sec
 uint32_t          firstBlock, // First block # in temp working file
                   nBlocks;    // Number of blocks in file
 Sd2Card           card;       // SD card global instance (only one)
 SdVolume          volume;     // Filesystem global instance (only one)
 SdFile            root;       // Root directory (only one)
+volatile uint8_t *port;       // NeoPixel PORT register
 
 // INITIALIZATION ------------------------------------------------------------
 
@@ -94,9 +90,12 @@ void setup() {
   digitalWrite(TRIGGER, HIGH);           // Enable pullup on trigger button
   startupTrigger = digitalRead(TRIGGER); // Poll startup trigger ASAP
   Serial.begin(57600);
-  strip.begin();
-  strip.show();                          // Clear LEDs
-  ledBuf = strip.getPixels();            // Get pointer to NeoPixel buffer
+  pinMode(LED_PIN, OUTPUT);              // Enable NeoPixel output
+  digitalWrite(LED_PIN, LOW);            // Default logic state = low
+  port    = portOutputRegister(digitalPinToPort(LED_PIN));
+  pinMask = digitalPinToBitMask(LED_PIN);
+  memset(sdBuf, 0, N_LEDS * 3);          // Clear LED buffer
+  show();                                // Init LEDs to 'off' state
 #ifdef ENCODERSTEPS
   digitalWrite(5, HIGH);                 // Enable pullup on encoder pin
 #endif
@@ -207,7 +206,7 @@ void loop() {
   // Stage first block, but don't display yet -- the loop below
   // does that only when Timer1 overflows.
   card.readStart(firstBlock);
-  card.readData(ledBuf);
+  card.readData(sdBuf);
 
   while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
@@ -226,20 +225,20 @@ void loop() {
     while(!(TIFR1 & _BV(TOV1)));         // Wait for Timer1 overflow
     TIFR1 |= _BV(TOV1);                  // Clear overflow bit
 
-    strip.show();                        // Display current line
+    show();                              // Display current line
     if(stopFlag) break;                  // Break when done
 
     if(++block >= nBlocks) {             // Past last block?
       card.readStop();
       if(digitalRead(TRIGGER) == HIGH) { // Trigger released?
-        memset(ledBuf, 0, N_LEDS * 3);   // LEDs off on next pass
+        memset(sdBuf, 0, N_LEDS * 3);    // LEDs off on next pass
         stopFlag = true;                 // Stop playback on next pass
         continue;
       }                                  // Else trigger still held
       block = 0;                         // Loop back to start
       card.readStart(firstBlock);        // Re-init multi-block read
     }
-    card.readData(ledBuf);               // Load next pixel row
+    card.readData(sdBuf);                // Load next pixel row
   }
 }
 
@@ -284,7 +283,7 @@ boolean bmpProcess(
             color,               // Color component index (R/G/B)
             raw,                 // 'Raw' R/G/B color value
             corr,                // Gamma-corrected R/G/B
-           *ledPtr,              // Pointer into ledBuf (output)
+           *ledPtr,              // Pointer into sdBuf (output)
            *ledStartPtr;         // First LED column to process (crop/center)
   uint16_t  b16;                 // 16-bit dup of b
   uint32_t  bmpImageoffset,      // Start of image data in BMP file
@@ -304,16 +303,16 @@ boolean bmpProcess(
     return false;
   }
 
-  if(inFile.read(ledBuf, 34)             &&    // Borrow ledBuf to load header
-    (*(uint16_t *)&ledBuf[ 0] == 0x4D42) &&    // BMP signature
-    (*(uint16_t *)&ledBuf[26] == 1)      &&    // Planes: must be 1
-    (*(uint16_t *)&ledBuf[28] == 24)     &&    // Bits per pixel: must be 24
-    (*(uint32_t *)&ledBuf[30] == 0)) {         // Compression: must be 0 (none)
+  if(inFile.read(sdBuf, 34)             &&    // Load header
+    (*(uint16_t *)&sdBuf[ 0] == 0x4D42) &&    // BMP signature
+    (*(uint16_t *)&sdBuf[26] == 1)      &&    // Planes: must be 1
+    (*(uint16_t *)&sdBuf[28] == 24)     &&    // Bits per pixel: must be 24
+    (*(uint32_t *)&sdBuf[30] == 0)) {         // Compression: must be 0 (none)
     // Supported BMP format -- proceed!
-    bmpImageoffset = *(uint32_t *)&ledBuf[10]; // Start of image data
-    bmpWidth       = *(uint32_t *)&ledBuf[18]; // Image dimensions
-    bmpHeight      = *(uint32_t *)&ledBuf[22];
-    // That's some nonportable, endian-dependent code there.
+    bmpImageoffset = *(uint32_t *)&sdBuf[10]; // Start of image data
+    bmpWidth       = *(uint32_t *)&sdBuf[18]; // Image dimensions
+    bmpHeight      = *(uint32_t *)&sdBuf[22];
+    // That's some nonportable, endian-dependent code right there.
 
     Serial.print(bmpWidth);
     Serial.write('x');
@@ -352,13 +351,13 @@ boolean bmpProcess(
 
       if(bmpWidth >= N_LEDS) { // BMP matches LED bar width, or crop image
         bmpStartCol = (bmpWidth - N_LEDS) / 2;
-        ledStartPtr = ledBuf;
+        ledStartPtr = sdBuf;
         columns     = N_LEDS;
       } else {                 // Center narrow image within LED bar
         bmpStartCol = 0;
-        ledStartPtr = &ledBuf[((N_LEDS - bmpWidth) / 2) * 3];
+        ledStartPtr = &sdBuf[((N_LEDS - bmpWidth) / 2) * 3];
         columns     = bmpWidth;
-        memset(ledBuf, 0, N_LEDS * 3); // Clear left/right pixels
+        memset(sdBuf, 0, N_LEDS * 3); // Clear left/right pixels
       }
 
       for(row=0; row<bmpHeight; row++) { // For each row in image...
@@ -396,13 +395,13 @@ boolean bmpProcess(
             raw  = pixel[color];                        // 'Raw' G/R/B
             corr = pgm_read_byte(&gamma[raw]);          // Gamma-corrected
             if(pgm_read_byte(&bump[raw]) > d) corr++;   // Dither up?
-            *ledPtr++ = corr;                           // Store back in ledBuf
+            *ledPtr++ = corr;                           // Store back in sdBuf
             sum      += corr;                           // Total brightness
           } // Next color byte
         } // Next column
 
         if(outName) {
-          if(!card.writeBlock(firstBlock + row, (uint8_t *)ledBuf))
+          if(!card.writeBlock(firstBlock + row, (uint8_t *)sdBuf))
             Serial.println(F("Write error"));
         }
         if(sum > lineMax) lineMax = sum;
@@ -440,10 +439,71 @@ static uint32_t benchmark(uint32_t block, uint32_t n) {
   card.readStart(block);
   do {
     t = micros();
-    card.readData(ledBuf);
+    card.readData(sdBuf);
     if((t = (micros() - t)) > maxTime) maxTime = t;
   } while(--n);
   card.readStop();
 
   return maxTime;
+}
+
+// NEOPIXEL FUNCTIONS --------------------------------------------------------
+
+// The normal NeoPixel library isn't used by this project.  SD I/O and
+// NeoPixels need to occupy the same buffer, there isn't quite an elegant
+// way to do this with the existing library that avoids refreshing a longer
+// strip than necessary.  Instead, just the core update function for 800 KHz
+// pixels on 16 MHz AVR is replicated here; not handling every permutation.
+
+static void show(void) {
+  volatile uint16_t
+    i   = N_LEDS * 3; // Loop counter
+  volatile uint8_t
+   *ptr = sdBuf,      // Pointer to next byte
+    b   = *ptr++,     // Current byte value
+    hi,               // PORT w/output bit set high
+    lo,               // PORT w/output bit set low
+    next,
+    bit = 8;
+
+  noInterrupts();
+  hi   = *port |  pinMask;
+  lo   = *port & ~pinMask;
+  next = lo;
+
+  asm volatile(
+   "head20_%=:"                "\n\t"
+    "st   %a[port],  %[hi]"    "\n\t"
+    "sbrc %[byte],  7"         "\n\t"
+     "mov  %[next], %[hi]"     "\n\t"
+    "dec  %[bit]"              "\n\t"
+    "st   %a[port],  %[next]"  "\n\t"
+    "mov  %[next] ,  %[lo]"    "\n\t"
+    "breq nextbyte20_%="       "\n\t"
+    "rol  %[byte]"             "\n\t"
+    "rjmp .+0"                 "\n\t"
+    "nop"                      "\n\t"
+    "st   %a[port],  %[lo]"    "\n\t"
+    "nop"                      "\n\t"
+    "rjmp .+0"                 "\n\t"
+    "rjmp head20_%="           "\n\t"
+   "nextbyte20_%=:"            "\n\t"
+    "ldi  %[bit]  ,  8"        "\n\t"
+    "ld   %[byte] ,  %a[ptr]+" "\n\t"
+    "st   %a[port], %[lo]"     "\n\t"
+    "nop"                      "\n\t"
+    "sbiw %[count], 1"         "\n\t"
+     "brne head20_%="          "\n"
+    : [port]  "+e" (port),
+      [byte]  "+r" (b),
+      [bit]   "+r" (bit),
+      [next]  "+r" (next),
+      [count] "+w" (i)
+    : [ptr]    "e" (ptr),
+      [hi]     "r" (hi),
+      [lo]     "r" (lo));
+
+  interrupts();
+  // There's no explicit 50 uS delay here as with most NeoPixel code;
+  // SD card block read provides ample time for latch!
 }
