@@ -25,12 +25,12 @@
 // with 'soft' SPI on the Arduino Mega (too slow).  Also, even with 'hard'
 // SPI, this DOES NOT RUN ANY FASTER on the Mega -- a common misconception.
 
-// Written by Phil Burgess / Paint Your Dragon for Adafruit Industries.
-// MIT license.
-
 // Adafruit invests time and resources providing this open source code,
 // please support Adafruit and open-source hardware by purchasing
 // products from Adafruit!
+
+// Written by Phil Burgess / Paint Your Dragon for Adafruit Industries.
+// BSD license, all text above must be included in any redistribution.
 
 #include <SdFat.h>
 #include <avr/pgmspace.h>
