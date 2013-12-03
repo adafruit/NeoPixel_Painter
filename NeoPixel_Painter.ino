@@ -63,7 +63,7 @@
 // Define ENCODERSTEPS to use rotary encoder rather than timer to advance
 // each line.  The encoder MUST be on the T1 pin...this is digital pin 5
 // on the Arduino Uno...check datasheet/pinout ref for other board types.
-//#define ENCODERSTEPS 10 // # of steps needed to advance 1 line
+//#define ENCODERSTEPS 8 // # of steps needed to advance 1 line
 
 
 // NON-CONFIGURABLE STUFF ----------------------------------------------------
@@ -169,7 +169,7 @@ void setup() {
   // lines/sec.  Not all SD cards perform the same.  This makes sure a
   // reasonable speed limit is used.
   maxLPS  = (uint16_t)(1000000L /                   // 1 uSec /
-    (((benchmark(firstBlock, nBlocks) * 21) / 20) + // time+5% +
+    (((benchmark(firstBlock, nBlocks) * 21) / 20) + // time + 5% +
      (N_LEDS * 30L) + OVERHEAD));                   // 30 uSec/pixel
   if(maxLPS > 400) maxLPS = 400; // NeoPixel PWM rate is ~400 Hz
   Serial.print(F("Max lines/sec: "));
@@ -205,8 +205,9 @@ void loop() {
 
   // Stage first block, but don't display yet -- the loop below
   // does that only when Timer1 overflows.
-  card.readStart(firstBlock);
-  card.readData(sdBuf);
+  card.readBlock(firstBlock, sdBuf);
+  // readBlock is used rather than readStart/readData/readEnd as
+  // the duration between block reads may exceed the SD timeout.
 
   while(digitalRead(TRIGGER) == HIGH);   // Wait for trigger button
 
@@ -218,27 +219,25 @@ void loop() {
   // Set up timer based on dial input
   uint32_t linesPerSec = map(analogRead(SPEED), 0, 1023, 10, maxLPS);
   // Serial.println(linesPerSec);
-  OCR1A = (F_CPU / 64) / linesPerSec;    // Timer1 interval
+  OCR1A = (F_CPU / 64) / linesPerSec;          // Timer1 interval
 #endif
 
   for(;;) {
-    while(!(TIFR1 & _BV(TOV1)));         // Wait for Timer1 overflow
-    TIFR1 |= _BV(TOV1);                  // Clear overflow bit
+    while(!(TIFR1 & _BV(TOV1)));               // Wait for Timer1 overflow
+    TIFR1 |= _BV(TOV1);                        // Clear overflow bit
 
-    show();                              // Display current line
-    if(stopFlag) break;                  // Break when done
+    show();                                    // Display current line
+    if(stopFlag) break;                        // Break when done
 
-    if(++block >= nBlocks) {             // Past last block?
-      card.readStop();
-      if(digitalRead(TRIGGER) == HIGH) { // Trigger released?
-        memset(sdBuf, 0, N_LEDS * 3);    // LEDs off on next pass
-        stopFlag = true;                 // Stop playback on next pass
+    if(++block >= nBlocks) {                   // Past last block?
+      if(digitalRead(TRIGGER) == HIGH) {       // Trigger released?
+        memset(sdBuf, 0, N_LEDS * 3);          // LEDs off on next pass
+        stopFlag = true;                       // Stop playback on next pass
         continue;
-      }                                  // Else trigger still held
-      block = 0;                         // Loop back to start
-      card.readStart(firstBlock);        // Re-init multi-block read
+      }                                        // Else trigger still held
+      block = 0;                               // Loop back to start
     }
-    card.readData(sdBuf);                // Load next pixel row
+    card.readBlock(block + firstBlock, sdBuf); // Load next pixel row
   }
 }
 
@@ -436,13 +435,11 @@ boolean bmpProcess(
 static uint32_t benchmark(uint32_t block, uint32_t n) {
   uint32_t t, maxTime = 0L;
 
-  card.readStart(block);
   do {
     t = micros();
-    card.readData(sdBuf);
+    card.readBlock(block++, sdBuf);
     if((t = (micros() - t)) > maxTime) maxTime = t;
   } while(--n);
-  card.readStop();
 
   return maxTime;
 }
