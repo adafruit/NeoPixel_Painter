@@ -12,12 +12,12 @@
 // Then set dial for playback speed.
 
 // This is a 'plain vanilla' example with no UI or anything -- it always
-// reads a fixed file at startup (frame000.bmp in root folder), outputs
-// frame000.tmp (warning: doesn't ask, just overwrites it), then plays back
-// from this file each time button is tapped (repeating in loop if held).
-// More advanced applications could add a UI (e.g. 16x2 LCD shield) or
-// process multiple files for animation.  NONE OF THAT IS HERE THOUGH,
-// you will need to get clever and rip up some of this code for such.
+// reads a fixed set of files at startup (frame000.bmp - frameNNN.bmp in
+// root folder), outputs frameNNN.tmp for each (warning: doesn't ask, just
+// overwrites), then plays back from the file(s) each time button is tapped
+// (repeating in loop if held).  More advanced applications could add a UI
+// (e.g. 16x2 LCD shield), but THAT IS NOT IMPLEMENTED HERE, you will need
+// to get clever and rip up some of this code for such.
 
 // This is well-tailored to the Arduino Uno or similar boards.  It may work
 // with the Arduino Leonardo *IF* your SD shield or breakout board uses the
@@ -38,7 +38,7 @@
 
 // CONFIGURABLE STUFF --------------------------------------------------------
 
-#define N_LEDS       144 // Max value of 170 (fits one SD card block)
+#define N_LEDS       144 // Max value is 170 (fits one SD card block)
 #define CARD_SELECT   10 // SD card select pin (some shields use #4, not 10)
 #define LED_PIN        6 // NeoPixels connect here
 #define SPEED         A0 // Speed-setting dial
@@ -70,22 +70,28 @@
 
 #define OVERHEAD 150 // Extra microseconds for loop processing, etc.
 
-uint8_t           sdBuf[512], // One SD block (also for NeoPixel color data)
-                  pinMask;    // NeoPixel pin bitmask
-uint16_t          maxLPS;     // Max playback lines/sec
-uint32_t          firstBlock, // First block # in temp working file
-                  nBlocks;    // Number of blocks in file
-Sd2Card           card;       // SD card global instance (only one)
-SdVolume          volume;     // Filesystem global instance (only one)
-SdFile            root;       // Root directory (only one)
-volatile uint8_t *port;       // NeoPixel PORT register
+uint8_t           sdBuf[512],  // One SD block (also for NeoPixel color data)
+                  pinMask;     // NeoPixel pin bitmask
+uint16_t          maxLPS,      // Max playback lines/sec
+                  nFrames = 0, // Total # of image files
+                  frame   = 0; // Current image # being painted
+uint32_t          firstBlock,  // First block # in temp working file
+                  nBlocks;     // Number of blocks in file
+Sd2Card           card;        // SD card global instance (only one)
+SdVolume          volume;      // Filesystem global instance (only one)
+SdFile            root;        // Root directory (only one)
+volatile uint8_t *port;        // NeoPixel PORT register
 
 // INITIALIZATION ------------------------------------------------------------
 
 void setup() {
-  uint8_t  b, startupTrigger;
-  uint32_t lastBlock;
+  uint8_t  b, startupTrigger, minBrightness;
+  char     infile[13], outfile[13];
+  boolean  found;
+  uint16_t i, n;
   SdFile   tmp;
+  uint32_t lastBlock;
+
 
   digitalWrite(TRIGGER, HIGH);           // Enable pullup on trigger button
   startupTrigger = digitalRead(TRIGGER); // Poll startup trigger ASAP
@@ -115,47 +121,59 @@ void setup() {
   }
   root.openRoot(&volume);
 
-  // This simple application always reads the file 'frame000.bmp' in the
-  // root directory; there's no file selection mechanism or UI.  Clearly,
-  // there are plans to do multi-frame rendering, but there is currently
-  // no mechanism implemented for this.
+  // This simple application always reads the files 'frameNNN.bmp' in
+  // the root directory; there's no file selection mechanism or UI.
 
   // If button is held at startup, the processing step is skipped, just
-  // goes right to playback of the prior converted file (if present).
+  // goes right to playback of the prior converted file(s) (if present).
   if(startupTrigger == HIGH) { // No button press
-    // Two passes are made over the input image.  First pass estimates
-    // the max brightness level that the power supply can sustain...
-    b = 255;                                    // Start with max brightness
-    bmpProcess(root, "frame000.bmp", NULL, &b); // b modified to 'safe' max
-    // If one were to use multiple images for animation, best to make a pass
-    // through all the frames first, determining the minimum safe max among
-    // all of them, then adjust every image to a uniform brightness level.
+
+    // Two passes are made over the input images.  First pass counts the
+    // files and estimates the max brightness level that the power supply
+    // can sustain...
+    minBrightness = 255;
+    do {
+      sprintf(infile, "frame%03d.bmp", nFrames);
+      b = 255;
+      if(found = bmpProcess(root, infile, NULL, &b)) { // b modified to safe max
+        nFrames++;
+        if(b < minBrightness) minBrightness = b;
+      }
+    } while(found && (nFrames < 1000));
+
+    Serial.print(nFrames);
+    Serial.print(" frames\nbrightness = ");
+    Serial.println(minBrightness);
 
     // Read dial, setting brightness between 1 (almost but not quite off)
     // and the previously-estimated safe max.
-    b = map(analogRead(BRIGHTNESS), 0, 1023, 1, b);
+    b = map(analogRead(BRIGHTNESS), 0, 1023, 1, minBrightness);
   
     // Second pass now applies brightness adjustment while converting
-    // the image from BMP to a raw representation of NeoPixel data
-    // (this outputs the file 'frame000.tmp' -- any existing file by
-    // that name will simply be clobbered, IT DOES NOT ASK).
-    bmpProcess(root, "frame000.bmp", "frame000.tmp", &b);
-  } else {
-    // Get existing contiguous tempfile info
-    if(!tmp.open(&root, "frame000.tmp", O_RDONLY)) {
-      error(F("Could not open NeoPixel tempfile for input"));
+    // the image(s) from BMP to a raw representation of NeoPixel data
+    // (this outputs the file(s) 'frameNNN.tmp' -- any existing file
+    // by that name will simply be clobbered, IT DOES NOT ASK).
+    for(i=0; i<nFrames; i++) {
+      sprintf(infile , "frame%03d.bmp", i);
+      sprintf(outfile, "frame%03d.tmp", i);
+      b = minBrightness;
+      bmpProcess(root, infile, outfile, &b);
     }
-    if(!tmp.contiguousRange(&firstBlock, &lastBlock)) {
-      error(F("NeoPixel tempfile is not contiguous"));
-    }
-    // Number of blocks needs to be calculated from file size, not the
-    // range values.  The contiguous file creation and range functions
-    // work on cluster boundaries, not necessarily the actual file size.
-    nBlocks = tmp.fileSize() / 512;
-
-    tmp.close(); // File handle is no longer accessed, just block reads
     while(digitalRead(TRIGGER) == LOW); // Wait for button release
-  }
+
+  } else { // Button held -- use existing data
+
+    do { // Scan for files to get nFrames
+      sprintf(infile, "frame%03d.tmp", nFrames);
+      if(found = tmp.open(&root, infile, O_RDONLY)) {
+        if(tmp.contiguousRange(&firstBlock, &lastBlock)) {
+          nFrames++;
+        }
+        tmp.close();
+      }
+    } while(found);
+
+  } // end startupTrigger test
 
 #ifdef ENCODERSTEPS
   // To use a rotary encoder rather than timer, connect one output
@@ -168,9 +186,17 @@ void setup() {
   // file to estimate block read time (+5% margin) and max playback
   // lines/sec.  Not all SD cards perform the same.  This makes sure a
   // reasonable speed limit is used.
-  maxLPS  = (uint16_t)(1000000L /                   // 1 uSec /
-    (((benchmark(firstBlock, nBlocks) * 21) / 20) + // time + 5% +
-     (N_LEDS * 30L) + OVERHEAD));                   // 30 uSec/pixel
+  for(i=0; i<nFrames; i++) { // Scan all files
+    sprintf(infile, "frame%03d.tmp", i);
+    tmp.open(&root, infile, O_RDONLY);
+    tmp.contiguousRange(&firstBlock, &lastBlock);
+    nBlocks = tmp.fileSize() / 512;
+    tmp.close();
+    n = (uint16_t)(1000000L /                         // 1 uSec /
+      (((benchmark(firstBlock, nBlocks) * 21) / 20) + // time + 5% +
+       (N_LEDS * 30L) + OVERHEAD));                   // 30 uSec/pixel
+    if(n > maxLPS) maxLPS = n;
+  }
   if(maxLPS > 400) maxLPS = 400; // NeoPixel PWM rate is ~400 Hz
   Serial.print(F("Max lines/sec: "));
   Serial.println(maxLPS);
@@ -202,6 +228,24 @@ static void error(const __FlashStringHelper *ptr) {
 void loop() {
   uint32_t block    = 0;     // Current block # within file
   boolean  stopFlag = false; // If set, stop playback loop
+  uint32_t lastBlock;
+  char     infile[13];
+  SdFile   tmp;
+
+  // Get existing contiguous tempfile info
+  sprintf(infile, "frame%03d.tmp", frame);
+  if(!tmp.open(&root, infile, O_RDONLY)) {
+    error(F("Could not open NeoPixel tempfile for input"));
+  }
+  if(!tmp.contiguousRange(&firstBlock, &lastBlock)) {
+    error(F("NeoPixel tempfile is not contiguous"));
+  }
+  // Number of blocks needs to be calculated from file size, not the
+  // range values.  The contiguous file creation and range functions
+  // work on cluster boundaries, not necessarily the actual file size.
+  nBlocks = tmp.fileSize() / 512;
+
+  tmp.close(); // File handle is no longer accessed, just block reads
 
   // Stage first block, but don't display yet -- the loop below
   // does that only when Timer1 overflows.
@@ -239,6 +283,8 @@ void loop() {
     }
     card.readBlock(block + firstBlock, sdBuf); // Load next pixel row
   }
+
+  if(++frame >= nFrames) frame = 0;
 }
 
 // BMP->NEOPIXEL FILE CONVERSION ---------------------------------------------
