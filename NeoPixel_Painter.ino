@@ -54,11 +54,9 @@
 // every scanline will demand equal current.  For extremely long or bright
 // images or longer strips, this may exceed the UBEC's capabilities, in
 // which case it shuts down (will need to disconnect battery).  If you
-// encounter this situation, set CURRENT_MAX to 3000.  Alternately, two
-// UBECs can be used in parallel -- each connected to 1/2 of the NeoPixel
-// strip (connect the grounds together, but NOT the +5V outputs -- the 5V
-// side of the strip must then be cut and each half powered by a separate
-// UBEC), CURRENT_MAX can then be bumped to 6000 mA.
+// encounter this situation, set CURRENT_MAX to 3000.  Alternately, a more
+// powerful UBEC can be substituted (RC hobby shops may have these),
+// setting CURRENT_MAX to suit.
 
 // Define ENCODERSTEPS to use rotary encoder rather than timer to advance
 // each line.  The encoder MUST be on the T1 pin...this is digital pin 5
