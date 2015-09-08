@@ -132,9 +132,14 @@ void setup() {
     minBrightness = 255;
     do {
       sprintf(infile, "frame%03d.bmp", nFrames);
-      b = 255;
-      if(found = bmpProcess(root, infile, NULL, &b)) { // b modified to safe max
+      b = 255; // Assume frame at full brightness to start...
+      // ...it's then modified by the bmpProcess() function here to the
+      // actual brightness limit the UBEC can sustain for *this image*.
+      if(found = bmpProcess(root, infile, NULL, &b)) {
         nFrames++;
+        // Keep track of the minimum 'b' value returned for *all images*.
+        // This will later be applied to all, in order that multi-frame
+        // animations can have consistent brightness throughout.
         if(b < minBrightness) minBrightness = b;
       }
     } while(found && (nFrames < 1000));
@@ -145,7 +150,7 @@ void setup() {
 
     // Read dial, setting brightness between 1 (almost but not quite off)
     // and the previously-estimated safe max.
-    b = map(analogRead(BRIGHTNESS), 0, 1023, 1, minBrightness);
+    minBrightness = map(analogRead(BRIGHTNESS), 0, 1023, 1, minBrightness);
   
     // Second pass now applies brightness adjustment while converting
     // the image(s) from BMP to a raw representation of NeoPixel data
@@ -154,7 +159,7 @@ void setup() {
     for(i=0; i<nFrames; i++) {
       sprintf(infile , "frame%03d.bmp", i);
       sprintf(outfile, "frame%03d.tmp", i);
-      b = minBrightness;
+      b = minBrightness; // Reset b to safe limit on each loop iteration
       bmpProcess(root, infile, outfile, &b);
     }
     while(digitalRead(TRIGGER) == LOW); // Wait for button release
