@@ -80,6 +80,9 @@ SdVolume          volume;      // Filesystem global instance (only one)
 SdFile            root;        // Root directory (only one)
 volatile uint8_t *port;        // NeoPixel PORT register
 
+//Forward Declaration: make 1.6.7+ happy
+boolean bmpProcess(SdFile &path, char *inName, char *outName, uint8_t *brightness);
+
 // INITIALIZATION ------------------------------------------------------------
 
 void setup() {
