@@ -75,13 +75,10 @@ uint16_t          maxLPS,      // Max playback lines/sec
                   frame   = 0; // Current image # being painted
 uint32_t          firstBlock,  // First block # in temp working file
                   nBlocks;     // Number of blocks in file
-Sd2Card           card;        // SD card global instance (only one)
-SdVolume          volume;      // Filesystem global instance (only one)
-SdFile            root;        // Root directory (only one)
+SdFat             sd;          // SD filesystem
 volatile uint8_t *port;        // NeoPixel PORT register
 
-//Forward Declaration: make 1.6.7+ happy
-boolean bmpProcess(SdFile &path, char *inName, char *outName, uint8_t *brightness);
+boolean bmpProcess(char *inName, char *outName, uint8_t *brightness);
 
 // INITIALIZATION ------------------------------------------------------------
 
@@ -108,7 +105,7 @@ void setup() {
 #endif
 
   Serial.print(F("Initializing SD card..."));
-  if(!card.init(SPI_FULL_SPEED, CARD_SELECT)) {
+  if(!sd.begin(CARD_SELECT, SPI_FULL_SPEED)) {
     error(F("failed. Things to check:\n"
             "* is a card is inserted?\n"
             "* Is your wiring correct?\n"
@@ -116,11 +113,13 @@ void setup() {
   }
   Serial.println(F("OK"));
 
+#if 0
   if(!volume.init(&card)) {
     error(F("Could not find FAT16/FAT32 partition.\n"
             "Make sure the card is formatted."));
   }
   root.openRoot(&volume);
+#endif
 
   // This simple application always reads the files 'frameNNN.bmp' in
   // the root directory; there's no file selection mechanism or UI.
@@ -138,7 +137,7 @@ void setup() {
       b = 255; // Assume frame at full brightness to start...
       // ...it's then modified by the bmpProcess() function here to the
       // actual brightness limit the UBEC can sustain for *this image*.
-      if(found = bmpProcess(root, infile, NULL, &b)) {
+      if(found = bmpProcess(infile, NULL, &b)) {
         nFrames++;
         // Keep track of the minimum 'b' value returned for *all images*.
         // This will later be applied to all, in order that multi-frame
@@ -163,7 +162,7 @@ void setup() {
       sprintf(infile , "frame%03d.bmp", i);
       sprintf(outfile, "frame%03d.tmp", i);
       b = minBrightness; // Reset b to safe limit on each loop iteration
-      bmpProcess(root, infile, outfile, &b);
+      bmpProcess(infile, outfile, &b);
     }
     while(digitalRead(TRIGGER) == LOW); // Wait for button release
 
@@ -171,7 +170,7 @@ void setup() {
 
     do { // Scan for files to get nFrames
       sprintf(infile, "frame%03d.tmp", nFrames);
-      if(found = tmp.open(&root, infile, O_RDONLY)) {
+      if(found = tmp.open(infile, O_RDONLY)) {
         if(tmp.contiguousRange(&firstBlock, &lastBlock)) {
           nFrames++;
         }
@@ -194,7 +193,7 @@ void setup() {
   // reasonable speed limit is used.
   for(i=0; i<nFrames; i++) { // Scan all files
     sprintf(infile, "frame%03d.tmp", i);
-    tmp.open(&root, infile, O_RDONLY);
+    tmp.open(infile, O_RDONLY);
     tmp.contiguousRange(&firstBlock, &lastBlock);
     nBlocks = tmp.fileSize() / 512;
     tmp.close();
@@ -240,7 +239,7 @@ void loop() {
 
   // Get existing contiguous tempfile info
   sprintf(infile, "frame%03d.tmp", frame);
-  if(!tmp.open(&root, infile, O_RDONLY)) {
+  if(!tmp.open(infile, O_RDONLY)) {
     error(F("Could not open NeoPixel tempfile for input"));
   }
   if(!tmp.contiguousRange(&firstBlock, &lastBlock)) {
@@ -255,7 +254,7 @@ void loop() {
 
   // Stage first block, but don't display yet -- the loop below
   // does that only when Timer1 overflows.
-  card.readBlock(firstBlock, sdBuf);
+  sd.card()->readBlock(firstBlock, sdBuf);
   // readBlock is used rather than readStart/readData/readEnd as
   // the duration between block reads may exceed the SD timeout.
 
@@ -287,7 +286,7 @@ void loop() {
       }                                        // Else trigger still held
       block = 0;                               // Loop back to start
     }
-    card.readBlock(block + firstBlock, sdBuf); // Load next pixel row
+    sd.card()->readBlock(block + firstBlock, sdBuf); // Load next pixel row
   }
 
   if(++frame >= nFrames) frame = 0;
@@ -312,7 +311,6 @@ void loop() {
 // aren't enough cycles to do this in realtime during playback.  To change
 // brightness, re-process image file using new brightness value.
 boolean bmpProcess(
-  SdFile  &path,
   char    *inName,
   char    *outName,
   uint8_t *brightness) {
@@ -349,7 +347,7 @@ boolean bmpProcess(
   Serial.print(F("Reading file '"));
   Serial.print(inName);
   Serial.print(F("'..."));
-  if(!inFile.open(&path, inName, O_RDONLY)) {
+  if(!inFile.open(inName, O_RDONLY)) {
     Serial.println(F("error"));
     return false;
   }
@@ -372,10 +370,10 @@ boolean bmpProcess(
 
     if(outName) { // Doing conversion?  Need outFile.
       // Delete existing outFile file (if any)
-      (void)SdFile::remove(&path, outName);
+      (void)sd.remove(outName);
       Serial.print(F("Creating contiguous file..."));
       // NeoPixel working file is always 512 bytes (one SD block) per row
-      if(outFile.createContiguous(&path, outName, 512L * bmpHeight)) {
+      if(outFile.createContiguous(sd.vwd(), outName, 512L * bmpHeight)) {
         uint32_t lastBlock;
         outFile.contiguousRange(&firstBlock, &lastBlock);
         // Once we have the first block index, the file handle
@@ -452,7 +450,7 @@ boolean bmpProcess(
         } // Next column
 
         if(outName) {
-          if(!card.writeBlock(firstBlock + row, (uint8_t *)sdBuf))
+          if(!sd.card()->writeBlock(firstBlock + row, (uint8_t *)sdBuf))
             Serial.println(F("Write error"));
         }
         if(sum > lineMax) lineMax = sum;
@@ -489,7 +487,7 @@ static uint32_t benchmark(uint32_t block, uint32_t n) {
 
   do {
     t = micros();
-    card.readBlock(block++, sdBuf);
+    sd.card()->readBlock(block++, sdBuf);
     if((t = (micros() - t)) > maxTime) maxTime = t;
   } while(--n);
 
